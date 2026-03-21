@@ -44,37 +44,46 @@ Confirm the disk layout matches your expected devices:
 - **Storage disk:** `/dev/sda3` (NTFS, label "Storage")
 - **DO NOT TOUCH:** `/dev/nvme1n1` (Windows)
 
-### 5. Mount the Broken System (Read-Only)
+### 5. Create Mount Points FIRST
+
+> **IMPORTANT:** Create BOTH mount points BEFORE mounting anything. If you mount
+> the broken system at `/mnt` directly, `/mnt` becomes read-only and you cannot
+> create `/mnt/recovery` inside it. Always use separate paths.
+
+```bash
+mkdir -p /mnt/source /mnt/recovery
+```
+
+### 6. Mount the Broken System (Read-Only)
 
 ```bash
 # Verify UUID before mounting
 blkid /dev/nvme0n1p3
 
-# Mount read-only — NEVER mount read-write
-mount -o ro /dev/nvme0n1p3 /mnt
+# Mount read-only at /mnt/source — NEVER mount read-write
+mount -o ro /dev/nvme0n1p3 /mnt/source
 ```
 
 Verify you can see your data:
 
 ```bash
-ls /mnt/home/
-ls /mnt/home/kyonax/
+ls /mnt/source/home/
+ls /mnt/source/home/kyonax/
 ```
 
-### 6. Mount the Storage Disk
+### 7. Mount the Storage Disk
 
 ```bash
 # Verify UUID before mounting
 blkid /dev/sda3
 
-mkdir -p /mnt/recovery
 mount -t ntfs3 /dev/sda3 /mnt/recovery
 
 # Confirm free space
 df -h /mnt/recovery
 ```
 
-### 7. Clone This Repo
+### 8. Clone This Repo
 
 ```bash
 git clone https://github.com/kyonax/pc-migration-scripts.git /tmp/recovery-scripts
@@ -82,12 +91,12 @@ cd /tmp/recovery-scripts
 chmod +x *.sh
 ```
 
-### 8. Verify Mounts Are Correct
+### 9. Verify Mounts Are Correct
 
 ```bash
 mount | grep /mnt
 # Should show:
-#   /dev/nvme0n1p3 on /mnt type ext4 (ro,...)
+#   /dev/nvme0n1p3 on /mnt/source type ext4 (ro,...)
 #   /dev/sda3 on /mnt/recovery type ntfs3 (rw,...)
 ```
 
@@ -101,9 +110,17 @@ After completing the pre-flight checklist:
 
 ### Step 1: Run the Checker
 
+Defaults match the mount points above, so you can run without arguments:
+
+```bash
+./checker.sh --output /tmp/recovery-scripts
+```
+
+Or explicitly:
+
 ```bash
 ./checker.sh \
-    --source /mnt \
+    --source /mnt/source \
     --target /mnt/recovery/backup-arch-2026-03-20 \
     --user kyonax \
     --output /tmp/recovery-scripts
@@ -129,9 +146,15 @@ Check:
 ### Step 3: Run the Mover
 
 ```bash
+./mover.sh --manifest /tmp/recovery-scripts/backup_manifest.json
+```
+
+Or explicitly:
+
+```bash
 ./mover.sh \
     --manifest /tmp/recovery-scripts/backup_manifest.json \
-    --source /mnt \
+    --source /mnt/source \
     --target /mnt/recovery/backup-arch-2026-03-20
 ```
 
@@ -146,11 +169,7 @@ The mover will:
 
 ```bash
 # Re-run checker — NEEDS_BACKUP table should now be empty
-./checker.sh \
-    --source /mnt \
-    --target /mnt/recovery/backup-arch-2026-03-20 \
-    --user kyonax \
-    --output /tmp/recovery-scripts
+./checker.sh --output /tmp/recovery-scripts
 
 cat backup_report.md
 ```
@@ -158,7 +177,7 @@ cat backup_report.md
 ### Step 5: Unmount
 
 ```bash
-umount /mnt
+umount /mnt/source
 umount /mnt/recovery
 ```
 
@@ -187,9 +206,21 @@ umount /mnt/recovery
 | `ntfs-incompatible.tar.gz`  | mover.sh     | Files with NTFS-incompatible names     |
 | `system/`                   | mover.sh     | Package lists, crontabs, systemd       |
 
+## Mount Points
+
+| Mount Point       | Device             | Filesystem | Mode       | Purpose              |
+|-------------------|--------------------|------------|------------|----------------------|
+| `/mnt/source`     | `/dev/nvme0n1p3`   | ext4       | read-only  | Broken system root   |
+| `/mnt/recovery`   | `/dev/sda3`        | ntfs3      | read-write | Storage / backup     |
+
+> **Why not `/mnt`?** Mounting the broken system directly at `/mnt` makes the
+> entire `/mnt` directory read-only, preventing creation of `/mnt/recovery`.
+> Using `/mnt/source` keeps both mount points independent under a writable `/mnt`.
+
 ## Safety Rules
 
 - **Source is ALWAYS read-only** — never mount `/dev/nvme0n1p3` without `-o ro`
+- **Create mount points before mounting** — `mkdir -p /mnt/source /mnt/recovery` first
 - **Never format `/dev/sda3`** — it has existing data, backup goes alongside
 - **Never touch `/dev/nvme1n1`** — that's the Windows disk
 - **Always verify UUIDs** with `blkid` before mounting

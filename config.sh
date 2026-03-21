@@ -3,7 +3,11 @@
 # Sourced by checker.sh and mover.sh
 
 # --- Default Mount Points ---
-DEFAULT_SOURCE="/mnt"
+# /mnt/source  = broken system root (read-only)
+# /mnt/recovery = Storage disk (read-write)
+# These MUST be separate paths — never mount the source at /mnt directly,
+# because that makes /mnt read-only and prevents creating /mnt/recovery.
+DEFAULT_SOURCE="/mnt/source"
 DEFAULT_TARGET="/mnt/recovery/backup-arch-2026-03-20"
 DEFAULT_USER="kyonax"
 DEFAULT_OUTPUT="."
