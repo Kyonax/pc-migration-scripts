@@ -9,7 +9,14 @@
 
 set -euo pipefail
 
+# Error trap — show where the script failed
+trap 'echo ""; echo "ERROR: mover.sh failed at line $LINENO (exit code $?)"; echo "Last command: $BASH_COMMAND"; exit 1' ERR
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ ! -f "${SCRIPT_DIR}/config.sh" ]]; then
+    echo "ERROR: config.sh not found at ${SCRIPT_DIR}/config.sh"
+    exit 1
+fi
 source "${SCRIPT_DIR}/config.sh"
 
 # --- Argument Parsing ---

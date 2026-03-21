@@ -9,7 +9,14 @@
 
 set -euo pipefail
 
+# Error trap — show where the script failed
+trap 'echo ""; echo "ERROR: checker.sh failed at line $LINENO (exit code $?)"; echo "Last command: $BASH_COMMAND"; exit 1' ERR
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ ! -f "${SCRIPT_DIR}/config.sh" ]]; then
+    echo "ERROR: config.sh not found at ${SCRIPT_DIR}/config.sh"
+    exit 1
+fi
 source "${SCRIPT_DIR}/config.sh"
 
 # --- Argument Parsing ---
@@ -98,7 +105,7 @@ echo ""
 local_crit=0 local_imp=0 local_sys=0
 for entry in "${SCAN_DIRS[@]}"; do
     IFS='|' read -r p _ _ <<< "$entry"
-    case "$p" in 1) ((local_crit++));; 2) ((local_imp++));; 3) ((local_sys++));; esac
+    case "$p" in 1) ((local_crit++)) || true;; 2) ((local_imp++)) || true;; 3) ((local_sys++)) || true;; esac
 done
 printf "  ${C_BOLD}Directories:${C_RESET}  %d total (%d CRITICAL, %d IMPORTANT, %d SYSTEM)\n" "$dir_total" "$local_crit" "$local_imp" "$local_sys"
 printf "  ${C_BOLD}Excludes:${C_RESET}     %d patterns\n" "${#EXCLUDE_PATTERNS[@]}"
