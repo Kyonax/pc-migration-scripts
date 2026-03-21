@@ -330,17 +330,15 @@ for entry in "${SCAN_DIRS[@]}"; do
     local_source=$(resolve_path "$config_path" "$SOURCE" "$USER_NAME")
 
     # Overall progress
-    local overall_pct=$(( (dir_index * 100) / dir_total ))
-    local bar
+    overall_pct=$(( (dir_index * 100) / dir_total ))
     bar=$(progress_bar "$overall_pct")
-    local elapsed
     elapsed=$(elapsed_since "$SCAN_START")
 
     printf "${C_BOLD}[%d/%d] [%s] %3d%% ${C_RESET}${C_DIM}elapsed %s${C_RESET}\n" \
         "$dir_index" "$dir_total" "$bar" "$overall_pct" "$elapsed"
 
     # Priority label
-    local prio_label prio_color
+    prio_label="" ; prio_color=""
     case "$priority" in
         1) prio_label="CRITICAL" prio_color="$C_RED" ;;
         2) prio_label="IMPORTANT" prio_color="$C_YELLOW" ;;
