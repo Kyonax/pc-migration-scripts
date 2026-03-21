@@ -35,11 +35,8 @@ SCAN_DIRS=(
     "2|~/Desktop|Desktop files"
     "2|~/Downloads|Downloaded files"
     "2|~/.local/share|App data"
-    # SYSTEM (priority 3)
-    "3|/etc|System configs"
-    "3|/var/lib/pacman/local|Package database"
-    "3|/var/spool/cron|Crontabs"
-    "3|~/.config/systemd|User systemd services"
+    # SYSTEM — removed: user does not want OS/system file backups
+    # Package lists, /etc, crontabs, systemd services are NOT backed up
 )
 
 # --- Exclude Patterns ---
@@ -47,27 +44,52 @@ SCAN_DIRS=(
 # Matched against the relative path from the scan root
 
 EXCLUDE_PATTERNS=(
+    # Caches (regenerable)
     ".cache"
+    ".thumbnails"
+    # Package manager caches
     "node_modules"
     "__pycache__"
     ".npm"
     ".yarn/cache"
     ".pnpm-store"
-    ".local/share/Trash"
-    ".local/share/baloo"
-    ".local/share/akonadi"
     ".cargo/registry"
     ".gradle/caches"
-    "target"
-    ".venv"
-    "venv"
-    ".thumbnails"
-    ".local/share/recently-used.xbel"
+    ".m2/repository"
     ".nvm/.cache"
     ".bundle/cache"
     ".gem/cache"
     ".composer/cache"
-    ".m2/repository"
+    # Build output
+    "target"
+    ".venv"
+    "venv"
+    # Desktop/app junk
+    ".local/share/Trash"
+    ".local/share/baloo"
+    ".local/share/akonadi"
+    ".local/share/recently-used.xbel"
+    # OS / system files (do NOT backup)
+    ".local/share/pacman"
+    ".local/share/systemd"
+    ".config/systemd"
+    "var/lib/pacman"
+    "var/cache/pacman"
+    "var/log"
+    "var/tmp"
+    "var/spool"
+    "etc"
+    "boot"
+    "usr"
+    "lib"
+    "lib64"
+    "opt"
+    "proc"
+    "sys"
+    "dev"
+    "run"
+    "tmp"
+    "lost+found"
 )
 
 # --- NTFS-Incompatible Characters ---

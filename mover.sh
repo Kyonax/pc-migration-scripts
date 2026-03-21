@@ -381,76 +381,8 @@ for perm_dir in "${PERMISSION_CRITICAL_DIRS[@]}"; do
     fi
 done
 
-# ═══════════════════════════════════════
-#   SYSTEM DATA
-# ═══════════════════════════════════════
-print_subheader "System Data Collection"
-echo ""
-
-SYSTEM_DIR="${TARGET}/system"
-mkdir -p "$SYSTEM_DIR"
-printf "  ${C_CYAN}📁${C_RESET} System directory: %s\n\n" "$SYSTEM_DIR"
-
-# Package lists
-printf "  ${C_CYAN}▸${C_RESET} Package lists:\n"
-
-printf "    ${C_DIM}Trying arch-chroot pacman -Qqe ...${C_RESET}"
-if arch-chroot "$SOURCE" pacman -Qqe > "${SYSTEM_DIR}/package-list-explicit.txt" 2>/dev/null; then
-    pkg_count=""
-    pkg_count=$(wc -l < "${SYSTEM_DIR}/package-list-explicit.txt")
-    printf "\r    ${C_GREEN}✓${C_RESET} package-list-explicit.txt (%d packages)     \n" "$pkg_count"
-    log_msg "OK" "Saved package-list-explicit.txt ($pkg_count packages) via arch-chroot" >> "$LOG_FILE"
-else
-    printf "\r    ${C_YELLOW}△${C_RESET} arch-chroot pacman -Qqe failed (broken system)     \n"
-    log_msg "WARN" "arch-chroot pacman -Qqe failed, using fallback" >> "$LOG_FILE"
-fi
-
-printf "    ${C_DIM}Trying arch-chroot pacman -Qqm ...${C_RESET}"
-if arch-chroot "$SOURCE" pacman -Qqm > "${SYSTEM_DIR}/package-list-aur.txt" 2>/dev/null; then
-    aur_count=""
-    aur_count=$(wc -l < "${SYSTEM_DIR}/package-list-aur.txt")
-    printf "\r    ${C_GREEN}✓${C_RESET} package-list-aur.txt (%d AUR packages)        \n" "$aur_count"
-    log_msg "OK" "Saved package-list-aur.txt ($aur_count packages) via arch-chroot" >> "$LOG_FILE"
-else
-    printf "\r    ${C_YELLOW}△${C_RESET} arch-chroot pacman -Qqm failed (broken system)      \n"
-    log_msg "WARN" "arch-chroot pacman -Qqm failed, using fallback" >> "$LOG_FILE"
-fi
-
-if [[ -d "${SOURCE}/var/lib/pacman/local" ]]; then
-    ls "${SOURCE}/var/lib/pacman/local/" > "${SYSTEM_DIR}/package-list-raw.txt" 2>/dev/null
-    raw_count=""
-    raw_count=$(wc -l < "${SYSTEM_DIR}/package-list-raw.txt")
-    printf "    ${C_GREEN}✓${C_RESET} package-list-raw.txt (%d entries, fallback)\n" "$raw_count"
-    log_msg "OK" "Saved package-list-raw.txt ($raw_count entries, fallback)" >> "$LOG_FILE"
-fi
-echo ""
-
-# Crontab
-printf "  ${C_CYAN}▸${C_RESET} Crontab:\n"
-if [[ -f "${SOURCE}/var/spool/cron/${DEFAULT_USER}" ]]; then
-    cp "${SOURCE}/var/spool/cron/${DEFAULT_USER}" "${SYSTEM_DIR}/crontab-${DEFAULT_USER}" 2>/dev/null
-    cron_lines=""
-    cron_lines=$(wc -l < "${SYSTEM_DIR}/crontab-${DEFAULT_USER}")
-    printf "    ${C_GREEN}✓${C_RESET} crontab-%s (%d lines)\n" "$DEFAULT_USER" "$cron_lines"
-    log_msg "OK" "Saved crontab-${DEFAULT_USER} ($cron_lines lines)" >> "$LOG_FILE"
-else
-    printf "    ${C_DIM}⊘ No crontab found for %s${C_RESET}\n" "$DEFAULT_USER"
-    log_msg "SKIP" "No crontab for ${DEFAULT_USER}" >> "$LOG_FILE"
-fi
-echo ""
-
-# User systemd services
-printf "  ${C_CYAN}▸${C_RESET} Systemd user services:\n"
-if [[ -d "${SOURCE}/home/${DEFAULT_USER}/.config/systemd" ]]; then
-    cp -a "${SOURCE}/home/${DEFAULT_USER}/.config/systemd" "${SYSTEM_DIR}/systemd-user/" 2>/dev/null
-    svc_count=""
-    svc_count=$(find "${SYSTEM_DIR}/systemd-user/" -type f 2>/dev/null | wc -l)
-    printf "    ${C_GREEN}✓${C_RESET} systemd-user/ (%d service files)\n" "$svc_count"
-    log_msg "OK" "Saved systemd-user/ ($svc_count files)" >> "$LOG_FILE"
-else
-    printf "    ${C_DIM}⊘ No systemd user services found${C_RESET}\n"
-    log_msg "SKIP" "No systemd user services" >> "$LOG_FILE"
-fi
+# System data collection removed — user does not want OS/system backups
+# (no package lists, crontabs, or systemd services)
 echo ""
 
 # --- Final log entry ---
@@ -505,9 +437,6 @@ fi
 if [[ -f "$NTFS_TAR" ]]; then
     printf "  ${C_CYAN}📦${C_RESET} NTFS bundle:      %s (%s)\n" "$NTFS_TAR" \
         "$(human_size "$(stat -c '%s' "$NTFS_TAR" 2>/dev/null || echo 0)")"
-fi
-if [[ -d "$SYSTEM_DIR" ]]; then
-    printf "  ${C_CYAN}⚙️${C_RESET}  System data:      %s\n" "$SYSTEM_DIR"
 fi
 echo ""
 
