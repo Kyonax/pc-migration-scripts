@@ -4,49 +4,194 @@ Recovery scripts for migrating data from a broken Arch Linux system to a Storage
 
 ## Scripts
 
-| Script | Purpose |
-|---|---|
-| `config.sh` | Shared configuration: paths, exclude patterns, priority tiers |
+| Script       | Purpose                                                                              |
+|--------------|--------------------------------------------------------------------------------------|
+| `config.sh`  | Shared configuration: paths, exclude patterns, priority tiers, helpers               |
 | `checker.sh` | Scans the broken system, compares against Storage, produces a report + JSON manifest |
-| `mover.sh` | Reads the manifest and transfers files with verbose progress |
+| `mover.sh`   | Reads the manifest and transfers files with verbose progress, ETA, speed             |
 
-## Usage
+## Pre-Flight Checklist
 
-From an Arch Linux live USB with both disks mounted:
+**Follow these steps IN ORDER before running any script.** The scripts assume both disks are already mounted correctly.
+
+### 1. Boot from Arch Linux Live USB
+
+Boot the machine from the Arch Linux live USB (`/dev/sdb`). You should see the `root@archiso` prompt.
+
+### 2. Verify Network Connectivity
 
 ```bash
-# 1. Clone this repo
+ping -c 1 github.com
+```
+
+If no network, connect via `iwctl` (Wi-Fi) or plug in Ethernet.
+
+### 3. Install Dependencies
+
+```bash
+pacman -Sy --noconfirm git jq bc
+```
+
+### 4. Identify Disks
+
+```bash
+lsblk
+lsblk -f
+```
+
+Confirm the disk layout matches your expected devices:
+- **Broken system:** `/dev/nvme0n1p3` (ext4, root partition)
+- **Storage disk:** `/dev/sda3` (NTFS, label "Storage")
+- **DO NOT TOUCH:** `/dev/nvme1n1` (Windows)
+
+### 5. Mount the Broken System (Read-Only)
+
+```bash
+# Verify UUID before mounting
+blkid /dev/nvme0n1p3
+
+# Mount read-only — NEVER mount read-write
+mount -o ro /dev/nvme0n1p3 /mnt
+```
+
+Verify you can see your data:
+
+```bash
+ls /mnt/home/
+ls /mnt/home/kyonax/
+```
+
+### 6. Mount the Storage Disk
+
+```bash
+# Verify UUID before mounting
+blkid /dev/sda3
+
+mkdir -p /mnt/recovery
+mount -t ntfs3 /dev/sda3 /mnt/recovery
+
+# Confirm free space
+df -h /mnt/recovery
+```
+
+### 7. Clone This Repo
+
+```bash
 git clone https://github.com/kyonax/pc-migration-scripts.git /tmp/recovery-scripts
 cd /tmp/recovery-scripts
 chmod +x *.sh
+```
 
-# 2. Run the checker (analyze what needs backup)
+### 8. Verify Mounts Are Correct
+
+```bash
+mount | grep /mnt
+# Should show:
+#   /dev/nvme0n1p3 on /mnt type ext4 (ro,...)
+#   /dev/sda3 on /mnt/recovery type ntfs3 (rw,...)
+```
+
+**STOP HERE if mounts are wrong.** The source MUST be read-only and the target MUST be read-write.
+
+---
+
+## Usage
+
+After completing the pre-flight checklist:
+
+### Step 1: Run the Checker
+
+```bash
 ./checker.sh \
     --source /mnt \
     --target /mnt/recovery/backup-arch-2026-03-20 \
     --user kyonax \
     --output /tmp/recovery-scripts
+```
 
-# 3. Review the report
+The checker will:
+- Scan all directories (CRITICAL → IMPORTANT → SYSTEM)
+- Show every file with its status (BACKUP, SAVED, EXCLUDED, SYMLINK)
+- Display per-directory progress with percentage and elapsed time
+- Generate `backup_report.md` and `backup_manifest.json`
+
+### Step 2: Review the Report
+
+```bash
 cat backup_report.md
+```
 
-# 4. Run the mover (transfer data)
+Check:
+- Total transfer size fits on Storage
+- No unexpected files in the EXCLUDED table
+- Large files (>1G) flagged for review
+
+### Step 3: Run the Mover
+
+```bash
 ./mover.sh \
     --manifest /tmp/recovery-scripts/backup_manifest.json \
     --source /mnt \
     --target /mnt/recovery/backup-arch-2026-03-20
 ```
 
+The mover will:
+- Show a pre-flight summary (file counts, sizes, disk space check)
+- Transfer each file with progress bar, percentage, speed, and ETA
+- Create tar archives for SSH/GPG keys (permission preservation)
+- Collect system data (package lists, crontabs, systemd services)
+- Log every operation to `mover_log.txt`
+
+### Step 4: Validate
+
+```bash
+# Re-run checker — NEEDS_BACKUP table should now be empty
+./checker.sh \
+    --source /mnt \
+    --target /mnt/recovery/backup-arch-2026-03-20 \
+    --user kyonax \
+    --output /tmp/recovery-scripts
+
+cat backup_report.md
+```
+
+### Step 5: Unmount
+
+```bash
+umount /mnt
+umount /mnt/recovery
+```
+
+---
+
 ## Requirements
 
-- `bash`, `coreutils` (standard on Arch live USB)
-- `jq` — install with `pacman -S --noconfirm jq`
-- `git` — install with `pacman -S --noconfirm git`
+| Dependency   | Install Command                   | Used By              |
+|--------------|-----------------------------------|----------------------|
+| `bash`       | (included in live USB)            | All scripts          |
+| `coreutils`  | (included in live USB)            | All scripts          |
+| `git`        | `pacman -S --noconfirm git`       | Cloning this repo    |
+| `jq`         | `pacman -S --noconfirm jq`       | mover.sh             |
+| `bc`         | `pacman -S --noconfirm bc`       | Human-readable sizes |
+| `ntfs-3g`    | (included in live USB)            | Mounting NTFS        |
 
 ## Output Files
 
-| File | Generated By | Purpose |
-|---|---|---|
-| `backup_report.md` | checker.sh | Human-readable report with 3 tables |
-| `backup_manifest.json` | checker.sh | Machine-readable manifest for mover.sh |
-| `mover_log.txt` | mover.sh | Timestamped log of all operations |
+| File                        | Generated By | Purpose                                |
+|-----------------------------|--------------|----------------------------------------|
+| `backup_report.md`          | checker.sh   | Human-readable report with 3 tables    |
+| `backup_manifest.json`      | checker.sh   | Machine-readable manifest for mover.sh |
+| `mover_log.txt`             | mover.sh     | Timestamped log of all operations      |
+| `ssh-keys.tar.gz`           | mover.sh     | SSH keys with Linux permissions        |
+| `gnupg-keys.tar.gz`         | mover.sh     | GPG keys with Linux permissions        |
+| `ntfs-incompatible.tar.gz`  | mover.sh     | Files with NTFS-incompatible names     |
+| `system/`                   | mover.sh     | Package lists, crontabs, systemd       |
+
+## Safety Rules
+
+- **Source is ALWAYS read-only** — never mount `/dev/nvme0n1p3` without `-o ro`
+- **Never format `/dev/sda3`** — it has existing data, backup goes alongside
+- **Never touch `/dev/nvme1n1`** — that's the Windows disk
+- **Always verify UUIDs** with `blkid` before mounting
+- **Review the checker report** before running the mover
+- **Re-run the checker** after the mover to validate nothing was missed
