@@ -128,7 +128,7 @@ fi
 # Priority breakdown
 printf "  ${C_BOLD}By priority:${C_RESET}\n"
 for p in 1 2 3; do
-    local pcount psize plabel pcolor
+    pcount="" ; psize="" ; plabel="" ; pcolor=""
     pcount=$(jq "[.[] | select((.status == \"NEEDS_BACKUP\" or .status == \"PARTIAL\") and .priority == $p)] | length" "$MANIFEST_FILE")
     psize=$(jq "[.[] | select((.status == \"NEEDS_BACKUP\" or .status == \"PARTIAL\") and .priority == $p) | .size_bytes] | add // 0" "$MANIFEST_FILE")
     case "$p" in
@@ -158,7 +158,7 @@ if [[ "$transfer_bytes" -gt "$avail_bytes" ]]; then
     exit 1
 fi
 
-local usage_pct=$(( (transfer_bytes * 100) / avail_bytes ))
+usage_pct=$(( (transfer_bytes * 100) / avail_bytes ))
 printf "    Usage:            %d%% of available\n" "$usage_pct"
 printf "    ${C_GREEN}✓ Sufficient space${C_RESET}\n"
 echo ""
@@ -198,7 +198,7 @@ while IFS=$'\t' read -r source_path target_path relative_path size_bytes status 
     # Priority change header
     if [[ "$priority" != "$current_priority" ]]; then
         current_priority="$priority"
-        local plabel pcolor
+        plabel pcolor
         case "$priority" in
             1) plabel="CRITICAL"  pcolor="$C_RED" ;;
             2) plabel="IMPORTANT" pcolor="$C_YELLOW" ;;
@@ -210,35 +210,35 @@ while IFS=$'\t' read -r source_path target_path relative_path size_bytes status 
     fi
 
     # Progress calculations
-    local pct=0
+    pct=0
     [[ "$transfer_bytes" -gt 0 ]] && pct=$(( (transferred_bytes * 100) / transfer_bytes ))
-    local bar
+    bar=""
     bar=$(progress_bar "$pct")
-    local transferred_human
+    transferred_human=""
     transferred_human=$(human_size "$transferred_bytes")
-    local file_size_human
+    file_size_human=""
     file_size_human=$(human_size "$size_bytes")
-    local elapsed
+    elapsed=""
     elapsed=$(elapsed_since "$TRANSFER_START")
 
     # ETA calculation
-    local eta="--:--"
-    local elapsed_secs=$(( $(date +%s) - TRANSFER_START ))
+    eta="--:--"
+    elapsed_secs=$(( $(date +%s) - TRANSFER_START ))
     if [[ $transferred_bytes -gt 0 ]] && [[ $elapsed_secs -gt 0 ]]; then
-        local remaining_bytes=$(( transfer_bytes - transferred_bytes ))
-        local bytes_per_sec=$(( transferred_bytes / elapsed_secs ))
+        remaining_bytes=$(( transfer_bytes - transferred_bytes ))
+        bytes_per_sec=$(( transferred_bytes / elapsed_secs ))
         if [[ $bytes_per_sec -gt 0 ]]; then
-            local eta_secs=$(( remaining_bytes / bytes_per_sec ))
-            local eta_mins=$(( eta_secs / 60 ))
-            local eta_s=$(( eta_secs % 60 ))
+            eta_secs=$(( remaining_bytes / bytes_per_sec ))
+            eta_mins=$(( eta_secs / 60 ))
+            eta_s=$(( eta_secs % 60 ))
             eta=$(printf "%dm %02ds" "$eta_mins" "$eta_s")
         fi
     fi
 
     # Speed calculation
-    local speed="--"
+    speed="--"
     if [[ $elapsed_secs -gt 0 ]] && [[ $transferred_bytes -gt 0 ]]; then
-        local bps=$(( transferred_bytes / elapsed_secs ))
+        bps=$(( transferred_bytes / elapsed_secs ))
         speed="$(human_size "$bps")/s"
     fi
 
@@ -267,19 +267,19 @@ while IFS=$'\t' read -r source_path target_path relative_path size_bytes status 
 
     # Copy the file
     if [[ -f "$source_path" ]]; then
-        local cp_start
+        cp_start=""
         cp_start=$(date +%s%N 2>/dev/null || date +%s)
 
         if cp -a "$source_path" "$target_path" 2>/dev/null; then
-            local cp_end
+            cp_end=""
             cp_end=$(date +%s%N 2>/dev/null || date +%s)
 
             # File copy speed (if nanoseconds available)
-            local cp_speed=""
+            cp_speed=""
             if [[ ${#cp_start} -gt 10 ]] && [[ $size_bytes -gt 0 ]]; then
-                local cp_ns=$(( cp_end - cp_start ))
+                cp_ns=$(( cp_end - cp_start ))
                 if [[ $cp_ns -gt 0 ]]; then
-                    local cp_bps=$(( (size_bytes * 1000000000) / cp_ns ))
+                    cp_bps=$(( (size_bytes * 1000000000) / cp_ns ))
                     cp_speed=" @ $(human_size "$cp_bps")/s"
                 fi
             fi
@@ -349,14 +349,14 @@ printf "  ${C_DIM}These tar archives preserve Linux permissions for restoration 
 for perm_dir in "${PERMISSION_CRITICAL_DIRS[@]}"; do
     source_dir="${SOURCE}/home/${DEFAULT_USER}/${perm_dir}"
     if [[ -d "$source_dir" ]]; then
-        local tar_name
+        tar_name=""
         [[ "$perm_dir" == ".gnupg" ]] && tar_name="gnupg-keys.tar.gz"
         [[ "$perm_dir" == ".ssh" ]] && tar_name="ssh-keys.tar.gz"
         [[ -z "${tar_name:-}" ]] && tar_name="${perm_dir#.}-keys.tar.gz"
 
-        local dir_size
+        dir_size=""
         dir_size=$(du -sb "$source_dir" 2>/dev/null | awk '{print $1}' || echo 0)
-        local file_count
+        file_count
         file_count=$(find "$source_dir" -type f 2>/dev/null | wc -l)
 
         printf "  ${C_CYAN}▸${C_RESET} Creating ${C_BOLD}%s${C_RESET} from %s (%d files, %s) ...\n" \
@@ -396,7 +396,7 @@ printf "  ${C_CYAN}▸${C_RESET} Package lists:\n"
 
 printf "    ${C_DIM}Trying arch-chroot pacman -Qqe ...${C_RESET}"
 if arch-chroot "$SOURCE" pacman -Qqe > "${SYSTEM_DIR}/package-list-explicit.txt" 2>/dev/null; then
-    local pkg_count
+    pkg_count=""
     pkg_count=$(wc -l < "${SYSTEM_DIR}/package-list-explicit.txt")
     printf "\r    ${C_GREEN}✓${C_RESET} package-list-explicit.txt (%d packages)     \n" "$pkg_count"
     log_msg "OK" "Saved package-list-explicit.txt ($pkg_count packages) via arch-chroot" >> "$LOG_FILE"
@@ -407,7 +407,7 @@ fi
 
 printf "    ${C_DIM}Trying arch-chroot pacman -Qqm ...${C_RESET}"
 if arch-chroot "$SOURCE" pacman -Qqm > "${SYSTEM_DIR}/package-list-aur.txt" 2>/dev/null; then
-    local aur_count
+    aur_count=""
     aur_count=$(wc -l < "${SYSTEM_DIR}/package-list-aur.txt")
     printf "\r    ${C_GREEN}✓${C_RESET} package-list-aur.txt (%d AUR packages)        \n" "$aur_count"
     log_msg "OK" "Saved package-list-aur.txt ($aur_count packages) via arch-chroot" >> "$LOG_FILE"
@@ -418,7 +418,7 @@ fi
 
 if [[ -d "${SOURCE}/var/lib/pacman/local" ]]; then
     ls "${SOURCE}/var/lib/pacman/local/" > "${SYSTEM_DIR}/package-list-raw.txt" 2>/dev/null
-    local raw_count
+    raw_count=""
     raw_count=$(wc -l < "${SYSTEM_DIR}/package-list-raw.txt")
     printf "    ${C_GREEN}✓${C_RESET} package-list-raw.txt (%d entries, fallback)\n" "$raw_count"
     log_msg "OK" "Saved package-list-raw.txt ($raw_count entries, fallback)" >> "$LOG_FILE"
@@ -429,7 +429,7 @@ echo ""
 printf "  ${C_CYAN}▸${C_RESET} Crontab:\n"
 if [[ -f "${SOURCE}/var/spool/cron/${DEFAULT_USER}" ]]; then
     cp "${SOURCE}/var/spool/cron/${DEFAULT_USER}" "${SYSTEM_DIR}/crontab-${DEFAULT_USER}" 2>/dev/null
-    local cron_lines
+    cron_lines=""
     cron_lines=$(wc -l < "${SYSTEM_DIR}/crontab-${DEFAULT_USER}")
     printf "    ${C_GREEN}✓${C_RESET} crontab-%s (%d lines)\n" "$DEFAULT_USER" "$cron_lines"
     log_msg "OK" "Saved crontab-${DEFAULT_USER} ($cron_lines lines)" >> "$LOG_FILE"
@@ -443,7 +443,7 @@ echo ""
 printf "  ${C_CYAN}▸${C_RESET} Systemd user services:\n"
 if [[ -d "${SOURCE}/home/${DEFAULT_USER}/.config/systemd" ]]; then
     cp -a "${SOURCE}/home/${DEFAULT_USER}/.config/systemd" "${SYSTEM_DIR}/systemd-user/" 2>/dev/null
-    local svc_count
+    svc_count=""
     svc_count=$(find "${SYSTEM_DIR}/systemd-user/" -type f 2>/dev/null | wc -l)
     printf "    ${C_GREEN}✓${C_RESET} systemd-user/ (%d service files)\n" "$svc_count"
     log_msg "OK" "Saved systemd-user/ ($svc_count files)" >> "$LOG_FILE"
@@ -464,10 +464,10 @@ echo ""
 # ═══════════════════════════════════════
 #   FINAL SUMMARY
 # ═══════════════════════════════════════
-local total_elapsed
+total_elapsed
 total_elapsed=$(elapsed_since "$TRANSFER_START")
-local total_secs=$(( $(date +%s) - TRANSFER_START ))
-local avg_speed="--"
+total_secs=$(( $(date +%s) - TRANSFER_START ))
+avg_speed="--"
 [[ $total_secs -gt 0 ]] && avg_speed="$(human_size $(( transferred_bytes / total_secs )))/s"
 
 print_header "TRANSFER COMPLETE"

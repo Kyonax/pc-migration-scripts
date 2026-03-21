@@ -116,7 +116,7 @@ echo ""
 for entry in "${SCAN_DIRS[@]}"; do
     IFS='|' read -r priority config_path description <<< "$entry"
     local_source=$(resolve_path "$config_path" "$SOURCE" "$USER_NAME")
-    local exists_mark
+    exists_mark=""
     if [[ -d "$local_source" ]]; then
         exists_mark="${C_GREEN}✓${C_RESET}"
     else
@@ -374,7 +374,7 @@ echo ""
 printf "  ${C_CYAN}▸${C_RESET} Writing manifest: %s ..." "$MANIFEST_FILE"
 {
     echo "["
-    local first=true
+    first=true
     for entry in "${manifest_entries[@]}"; do
         if [[ "$first" == "true" ]]; then
             echo "  $entry"
@@ -385,7 +385,6 @@ printf "  ${C_CYAN}▸${C_RESET} Writing manifest: %s ..." "$MANIFEST_FILE"
     done
     echo "]"
 } > "$MANIFEST_FILE"
-local manifest_size
 manifest_size=$(stat -c '%s' "$MANIFEST_FILE" 2>/dev/null || echo 0)
 printf " ${C_GREEN}OK${C_RESET} (%s, %d entries)\n" "$(human_size "$manifest_size")" "${#manifest_entries[@]}"
 
@@ -440,7 +439,7 @@ fi
     if [[ ${#table_already_saved[@]} -gt 0 ]]; then
         echo "| Source Path | Target Path | Size | Verified |"
         echo "|---|---|---|---|"
-        local count=0
+        count=0
         for row in "${table_already_saved[@]}"; do
             echo "$row"
             ((count++)) || true
@@ -459,7 +458,7 @@ fi
     if [[ ${#table_excluded[@]} -gt 0 ]]; then
         echo "| Source Path | Size | Reason |"
         echo "|---|---|---|"
-        local count=0
+        count=0
         for row in "${table_excluded[@]}"; do
             echo "$row"
             ((count++)) || true
@@ -478,17 +477,15 @@ fi
     echo "**Transfer size: $transfer_human** | **Already saved: $saved_human** | **Excluded: $excluded_human** | **Available: $target_avail**"
 } > "$REPORT_FILE"
 
-local report_size
 report_size=$(stat -c '%s' "$REPORT_FILE" 2>/dev/null || echo 0)
 printf " ${C_GREEN}OK${C_RESET} (%s)\n" "$(human_size "$report_size")"
 
 # ═══════════════════════════════════════
 #   FINAL SUMMARY
 # ═══════════════════════════════════════
-local total_elapsed
 total_elapsed=$(elapsed_since "$SCAN_START")
-local total_secs=$(( $(date +%s) - SCAN_START ))
-local total_rate=0
+total_secs=$(( $(date +%s) - SCAN_START ))
+total_rate=0
 [[ $total_secs -gt 0 ]] && total_rate=$(( total_files / total_secs ))
 
 print_header "SCAN COMPLETE"
@@ -499,7 +496,7 @@ echo ""
 echo ""
 
 # Status breakdown with visual bars
-local total_actionable=$((needs_backup_count + partial_count))
+total_actionable=$((needs_backup_count + partial_count))
 printf "  ${C_RED}█${C_RESET} ${C_BOLD}To transfer:${C_RESET}       %'6d files  %10s\n" "$total_actionable" "$transfer_human"
 printf "    ${C_DIM}├─ Needs backup:    %'6d files  %10s${C_RESET}\n" "$needs_backup_count" "$(human_size $needs_backup_bytes)"
 printf "    ${C_DIM}└─ Partial/changed: %'6d files  %10s${C_RESET}\n" "$partial_count" "$(human_size $partial_bytes)"
@@ -524,7 +521,7 @@ printf "  ${C_BOLD}Available on target:${C_RESET}  %s\n" "$target_avail"
 if [[ -n "$target_mount" ]] && [[ "$transfer_total" -gt "$target_mount" ]]; then
     printf "\n  ${C_BG_RED}${C_WHITE} ✗ NOT ENOUGH SPACE — transfer will fail! ${C_RESET}\n"
 elif [[ -n "$target_mount" ]]; then
-    local usage_pct=$(( (transfer_total * 100) / target_mount ))
+    usage_pct=$(( (transfer_total * 100) / target_mount ))
     printf "  ${C_DIM}Transfer will use %d%% of available space${C_RESET}\n" "$usage_pct"
 fi
 echo ""
