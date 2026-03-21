@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # checker.sh — Backup Analysis & Comparison
-# Scans relevant directories on a broken system, compares against what already
-# exists on the Storage disk, and produces a report + JSON manifest.
+# Scans the ENTIRE source disk, skips system directories, compares against
+# what already exists on Storage, and produces a report + JSON manifest.
 #
 # Usage:
 #   ./checker.sh --source /mnt/source --target /mnt/recovery/backup-arch-2026-03-20 \
@@ -9,7 +9,7 @@
 
 set -euo pipefail
 
-trap 'tput rmcup 2>/dev/null; echo ""; echo "ERROR: checker.sh failed at line $LINENO (exit code $?)"; echo "Last command: $BASH_COMMAND"; exit 1' ERR
+trap 'tput rmcup 2>/dev/null; printf "\033[;r"; tput cup 999 0 2>/dev/null; echo ""; echo "ERROR: checker.sh failed at line $LINENO (exit code $?)"; echo "Last command: $BASH_COMMAND"; exit 1' ERR
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ ! -f "${SCRIPT_DIR}/config.sh" ]]; then
@@ -65,10 +65,11 @@ already_saved_bytes=0
 excluded_count=0
 excluded_bytes=0
 symlink_count=0
+skipped_system_count=0
 large_file_count=0
 ntfs_incompatible_count=0
-dir_index=0
-dir_total=${#SCAN_DIRS[@]}
+scan_dirs_found=0
+scan_dirs_skipped=0
 current_dir_name=""
 current_dir_files=0
 current_dir_total=0
@@ -83,45 +84,62 @@ table_already_saved=()
 table_excluded=()
 
 # ═══════════════════════════════════════
+#   DISCOVER TOP-LEVEL DIRECTORIES
+# ═══════════════════════════════════════
+# Walk the root of the source disk, separate system vs user dirs
+user_dirs=()
+system_dirs_found=()
+
+for entry in "$SOURCE"/*/; do
+    [[ ! -d "$entry" ]] && continue
+    dirname=$(basename "$entry")
+    if is_system_dir "$dirname"; then
+        system_dirs_found+=("$dirname")
+        ((scan_dirs_skipped++)) || true
+    else
+        user_dirs+=("$entry")
+        ((scan_dirs_found++)) || true
+    fi
+done
+
+# Also check for files directly in the root (rare but possible)
+root_has_files=false
+for f in "$SOURCE"/*; do
+    [[ -f "$f" ]] && root_has_files=true && break
+done
+
+dir_total=${#user_dirs[@]}
+[[ "$root_has_files" == "true" ]] && ((dir_total++)) || true
+dir_index=0
+
+# ═══════════════════════════════════════
 #   TUI SETUP
 # ═══════════════════════════════════════
 TERM_LINES=$(tput lines 2>/dev/null || echo 24)
 TERM_COLS=$(tput cols 2>/dev/null || echo 80)
-DASHBOARD_HEIGHT=14
+DASHBOARD_HEIGHT=15
 LOG_START=$((DASHBOARD_HEIGHT + 1))
 
-# Cleanup on exit — restore terminal
 cleanup_tui() {
-    # Reset scroll region to full terminal
     printf '\033[;r'
-    # Move cursor below everything
     tput cup "$TERM_LINES" 0 2>/dev/null || true
     echo ""
 }
 trap cleanup_tui EXIT
 
-# Clear screen and set up regions
 clear
 
-# Draw dashboard (fixed top area)
 draw_dashboard() {
-    # Save cursor position
     tput sc 2>/dev/null || true
-
-    # Move to top
     tput cup 0 0 2>/dev/null || true
 
-    # Line 0: Header
     printf "${C_BOLD}${C_CYAN}══════════════════════════════════════════════════════════════${C_RESET}\n"
-    # Line 1: Title
-    printf "${C_BOLD}${C_CYAN}  BACKUP CHECKER — pc-migration-scripts${C_RESET}%*s\n" 22 ""
-    # Line 2: Header bottom
+    printf "${C_BOLD}${C_CYAN}  BACKUP CHECKER — Full Disk Scan${C_RESET}%*s\n" 28 ""
     printf "${C_BOLD}${C_CYAN}══════════════════════════════════════════════════════════════${C_RESET}\n"
 
-    # Line 3: Source / Target
-    printf "  Source: ${C_BOLD}%-25s${C_RESET} Target: ${C_BOLD}%s${C_RESET}\033[K\n" "$SOURCE" "$(basename "$TARGET")"
+    printf "  Source: ${C_BOLD}%s${C_RESET}  User: ${C_BOLD}%s${C_RESET}\033[K\n" "$SOURCE" "$USER_NAME"
 
-    # Line 4: Overall progress bar
+    # Overall progress
     overall_pct=0
     [[ $dir_total -gt 0 ]] && overall_pct=$(( (dir_index * 100) / dir_total ))
     bar=$(progress_bar "$overall_pct")
@@ -131,23 +149,22 @@ draw_dashboard() {
     [[ $elapsed_secs -gt 0 ]] && [[ $total_files -gt 0 ]] && rate=$(( total_files / elapsed_secs ))
     printf "  [${C_CYAN}%s${C_RESET}] ${C_BOLD}%3d%%${C_RESET}  %d/%d dirs  %s" \
         "$bar" "$overall_pct" "$dir_index" "$dir_total" "$elapsed"
-    [[ $rate -gt 0 ]] && printf "  %d files/s" "$rate"
+    [[ $rate -gt 0 ]] && printf "  %d f/s" "$rate"
     printf "\033[K\n"
 
-    # Line 5: Current directory
+    # Current directory
     if [[ -n "$current_dir_name" ]]; then
         dir_pct=0
         [[ $current_dir_total -gt 0 ]] && dir_pct=$(( (current_dir_files * 100) / current_dir_total ))
         printf "  Scanning: ${C_BOLD}%s${C_RESET} [%d/%d %d%%]\033[K\n" \
             "$current_dir_name" "$current_dir_files" "$current_dir_total" "$dir_pct"
     else
-        printf "  ${C_DIM}Waiting to start...${C_RESET}\033[K\n"
+        printf "  ${C_DIM}Discovering directories...${C_RESET}\033[K\n"
     fi
 
-    # Line 6: separator
     printf "  ${C_DIM}──────────────────────────────────────────────────────────${C_RESET}\n"
 
-    # Line 7-8: Counters (two columns)
+    # Counters
     transfer_total_live=$((needs_backup_bytes + partial_bytes))
     printf "  ${C_RED}+${C_RESET} BACKUP:   %'6d  %8s    ${C_GREEN}✓${C_RESET} SAVED:    %'6d  %8s\033[K\n" \
         "$((needs_backup_count + partial_count))" "$(human_size $transfer_total_live)" \
@@ -156,18 +173,16 @@ draw_dashboard() {
         "$excluded_count" "$(human_size $excluded_bytes)" \
         "$symlink_count"
 
-    # Line 9: Total scanned
-    printf "  ${C_BOLD}Total: %'d files scanned${C_RESET}" "$total_files"
-    [[ $large_file_count -gt 0 ]] && printf "  ${C_YELLOW}⚠ %d large${C_RESET}" "$large_file_count"
-    [[ $ntfs_incompatible_count -gt 0 ]] && printf "  ${C_YELLOW}⚠ %d NTFS${C_RESET}" "$ntfs_incompatible_count"
+    # Totals
+    printf "  ${C_BOLD}Total: %'d files${C_RESET}  ${C_DIM}Dirs: %d scanned, %d system-skipped${C_RESET}" \
+        "$total_files" "$scan_dirs_found" "$scan_dirs_skipped"
+    [[ $large_file_count -gt 0 ]] && printf "  ${C_YELLOW}⚠%d large${C_RESET}" "$large_file_count"
     printf "\033[K\n"
 
-    # Line 10: separator
     printf "  ${C_DIM}──────────────────────────────────────────────────────────${C_RESET}\n"
 
-    # Line 11: Last file
+    # Last file (truncated)
     if [[ -n "$last_file" ]]; then
-        # Truncate to fit terminal width
         display_file="$last_file"
         max_len=$(( TERM_COLS - 4 ))
         if [[ ${#display_file} -gt $max_len ]]; then
@@ -178,28 +193,20 @@ draw_dashboard() {
         printf "\033[K\n"
     fi
 
-    # Line 12: Log header
     printf "  ${C_DIM}── File Log ──────────────────────────────────────────────${C_RESET}\n"
-
-    # Line 13: blank spacer
     printf "\033[K"
 
-    # Restore cursor position
     tput rc 2>/dev/null || true
 }
 
-# Print a line in the scrolling log area
 log_line() {
-    # Move cursor to the scroll region and print
     printf "%s\n" "$1"
 }
 
-# Set scroll region (lines LOG_START to bottom)
+# Set scroll region
 printf '\033[%d;%dr' "$LOG_START" "$TERM_LINES"
-# Move cursor to scroll region start
 tput cup "$LOG_START" 0 2>/dev/null || true
 
-# Initial dashboard draw
 draw_dashboard
 
 # --- Add a manifest entry ---
@@ -256,7 +263,6 @@ add_entry() {
 # --- Scan a single file ---
 scan_file() {
     local file_path="$1"
-    local priority="$2"
 
     ((total_files++)) || true
     ((current_dir_files++)) || true
@@ -267,6 +273,10 @@ scan_file() {
     basename_file=$(basename "$file_path")
 
     last_file="$rel_from_source"
+
+    # Determine priority
+    local priority=2
+    is_critical_path "$rel_from_source" "$USER_NAME" && priority=1
 
     # Symlink
     if [[ -L "$file_path" ]]; then
@@ -311,11 +321,13 @@ scan_file() {
         local flags=""
         [[ $size_bytes -ge $LARGE_FILE_THRESHOLD ]] && flags=" ${C_YELLOW}[>1G]${C_RESET}"
         has_ntfs_bad_chars "$basename_file" && flags="${flags} ${C_RED}[NTFS]${C_RESET}"
-        log_line "  ${C_RED}+${C_RESET} ${C_BOLD}$rel_from_source${C_RESET} ${C_DIM}($size_human)${C_RESET}${flags}"
+        local pmark=""
+        [[ $priority -eq 1 ]] && pmark="${C_RED}*${C_RESET}"
+        log_line "  ${C_RED}+${C_RESET} ${pmark}${C_BOLD}$rel_from_source${C_RESET} ${C_DIM}($size_human)${C_RESET}${flags}"
     fi
 
-    # Update dashboard every 25 files
-    if (( total_files % 25 == 0 )); then
+    # Update dashboard every 50 files
+    if (( total_files % 50 == 0 )); then
         draw_dashboard
     fi
 }
@@ -323,32 +335,24 @@ scan_file() {
 # --- Scan a directory recursively ---
 scan_directory() {
     local dir_path="$1"
-    local priority="$2"
-    local description="$3"
+    local dir_label="$2"
 
     if [[ ! -d "$dir_path" ]]; then
         log_line "  ${C_RED}✗${C_RESET} Not found: $dir_path"
         return
     fi
 
-    # Count files for progress
     current_dir_total=$(find "$dir_path" -mindepth 1 \( -type f -o -type l \) 2>/dev/null | wc -l)
     current_dir_files=0
-    current_dir_name="$description"
+    current_dir_name="$dir_label"
 
     draw_dashboard
 
-    local prio_color=""
-    case "$priority" in
-        1) prio_color="$C_RED" ;;
-        2) prio_color="$C_YELLOW" ;;
-        3) prio_color="$C_CYAN" ;;
-    esac
     log_line ""
-    log_line "  ${prio_color}${C_BOLD}── P$priority: $description ──${C_RESET} ${C_DIM}($current_dir_total files in $dir_path)${C_RESET}"
+    log_line "  ${C_CYAN}${C_BOLD}── $dir_label ──${C_RESET} ${C_DIM}($current_dir_total files)${C_RESET}"
 
     while IFS= read -r -d '' file; do
-        scan_file "$file" "$priority"
+        scan_file "$file"
     done < <(find "$dir_path" -mindepth 1 \( -type f -o -type l \) -print0 2>/dev/null)
 
     # Empty directories
@@ -356,8 +360,7 @@ scan_directory() {
         local dir_rel="${dir#${SOURCE}/}"
         local target_dir="${TARGET}/${dir_rel}"
         if [[ -z "$(ls -A "$dir" 2>/dev/null)" ]]; then
-            add_entry "$dir" "$target_dir" "$dir_rel" 0 "NEEDS_BACKUP" "$priority" "directory" "null" "empty directory"
-            log_line "  ${C_CYAN}▪${C_RESET} ${C_DIM}$dir_rel (empty dir)${C_RESET}"
+            add_entry "$dir" "$target_dir" "$dir_rel" 0 "NEEDS_BACKUP" 2 "directory" "null" "empty directory"
         fi
     done < <(find "$dir_path" -mindepth 1 -type d -empty -print0 2>/dev/null)
 
@@ -365,40 +368,46 @@ scan_directory() {
 }
 
 # ═══════════════════════════════════════
-#   MAIN SCAN
+#   MAIN SCAN — WHOLE DISK
 # ═══════════════════════════════════════
-scanned_paths=()
 
-for entry in "${SCAN_DIRS[@]}"; do
-    IFS='|' read -r priority config_path description <<< "$entry"
-    ((dir_index++)) || true
-
-    local_source=$(resolve_path "$config_path" "$SOURCE" "$USER_NAME")
-
-    # Dedup check
-    skip=false
-    for scanned in "${scanned_paths[@]:-}"; do
-        if [[ -n "$scanned" ]] && [[ "$local_source" == "$scanned"/* ]]; then
-            log_line "  ${C_YELLOW}↷${C_RESET} ${C_DIM}$config_path (covered by parent)${C_RESET}"
-            skip=true
-            break
-        fi
-    done
-    [[ "$skip" == "true" ]] && continue
-
-    scan_directory "$local_source" "$priority" "$description"
-    scanned_paths+=("$local_source")
+# Show what we discovered
+log_line "  ${C_DIM}System dirs (skipped): ${system_dirs_found[*]}${C_RESET}"
+log_line "  ${C_BOLD}User dirs to scan: ${#user_dirs[@]}${C_RESET}"
+for ud in "${user_dirs[@]}"; do
+    log_line "    ${C_GREEN}▸${C_RESET} $(basename "$ud")"
 done
 
-# Final dashboard update
-current_dir_name="COMPLETE"
+# Scan root-level files first (if any)
+if [[ "$root_has_files" == "true" ]]; then
+    ((dir_index++)) || true
+    current_dir_name="/ (root files)"
+    current_dir_files=0
+    current_dir_total=0
+    draw_dashboard
+    log_line ""
+    log_line "  ${C_CYAN}${C_BOLD}── Root-level files ──${C_RESET}"
+    for f in "$SOURCE"/*; do
+        [[ -f "$f" || -L "$f" ]] && scan_file "$f"
+    done
+fi
+
+# Scan each user directory
+for user_dir in "${user_dirs[@]}"; do
+    ((dir_index++)) || true
+    dirname=$(basename "$user_dir")
+    scan_directory "$user_dir" "$dirname"
+done
+
+# Final dashboard
+current_dir_name="SCAN COMPLETE"
 current_dir_files=0
 current_dir_total=0
 dir_index=$dir_total
 draw_dashboard
 
 # ═══════════════════════════════════════
-#   GENERATE OUTPUTS (in scroll region)
+#   GENERATE OUTPUTS
 # ═══════════════════════════════════════
 log_line ""
 log_line "  ${C_CYAN}${C_BOLD}── Generating Outputs ──${C_RESET}"
@@ -453,6 +462,7 @@ fi
     echo "| Symlinks | $symlink_count | - |"
     echo "| Large files (>1G) | $large_file_count | - |"
     echo "| NTFS-incompatible names | $ntfs_incompatible_count | - |"
+    echo "| System dirs skipped | $scan_dirs_skipped | - |"
     echo "| **Total scanned** | **$total_files** | - |"
     echo ""
     echo "**Transfer size: $transfer_human** | Available on target: $target_avail"
@@ -514,7 +524,7 @@ report_size=$(stat -c '%s' "$REPORT_FILE" 2>/dev/null || echo 0)
 log_line "    ${C_GREEN}✓${C_RESET} OK ($(human_size "$report_size"))"
 
 # ═══════════════════════════════════════
-#   FINAL SUMMARY (in scroll region)
+#   FINAL SUMMARY
 # ═══════════════════════════════════════
 total_elapsed=$(elapsed_since "$SCAN_START")
 total_secs=$(( $(date +%s) - SCAN_START ))
@@ -529,6 +539,7 @@ log_line ""
 log_line "  ${C_RED}█${C_RESET} To transfer:   $((needs_backup_count + partial_count)) files ($transfer_human)"
 log_line "  ${C_GREEN}█${C_RESET} Already saved: $already_saved_count files ($saved_human)"
 log_line "  ${C_YELLOW}█${C_RESET} Excluded:      $excluded_count files ($excluded_human)"
+log_line "  ${C_DIM}█${C_RESET} System dirs:   $scan_dirs_skipped skipped (${system_dirs_found[*]})"
 log_line ""
 log_line "  Transfer: $transfer_human | Available: $target_avail"
 log_line ""

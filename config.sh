@@ -12,37 +12,47 @@ DEFAULT_TARGET="/mnt/recovery/backup-arch-2026-03-20"
 DEFAULT_USER="kyonax"
 DEFAULT_OUTPUT="."
 
-# --- Directory Scan Tiers ---
-# Priority 1: CRITICAL — Must Backup
-# Priority 2: IMPORTANT — Should Backup
-# Priority 3: SYSTEM — Backup Separately
-#
-# Format: "priority|relative_path|description"
-# Paths under home use ~ prefix (expanded at runtime to $SOURCE/home/$USER/)
-# Paths without ~ are relative to $SOURCE/
+# --- Scan Strategy ---
+# Instead of listing specific directories, we scan the ENTIRE source disk
+# and exclude system/OS directories. Everything that is not excluded = backup.
+# This ensures nothing user-related is missed.
 
-SCAN_DIRS=(
-    # CRITICAL (priority 1)
-    "1|~/.ssh|SSH keys"
-    "1|~/.gnupg|GPG keys"
-    "1|~/.brain.d|Org-roam knowledge base"
-    "1|~/Documents/github-kyonax|Dotfiles repo and git projects"
-    "1|~/.doom.d|Doom Emacs config"
-    # IMPORTANT (priority 2)
-    "2|~/.config|App configs"
-    "2|~/Documents|User documents"
-    "2|~/Pictures|User pictures"
-    "2|~/Desktop|Desktop files"
-    "2|~/Downloads|Downloaded files"
-    "2|~/.local/share|App data"
-    # SYSTEM — removed: user does not want OS/system file backups
-    # Package lists, /etc, crontabs, systemd services are NOT backed up
+# Top-level directories to SKIP entirely (system/OS — not user data)
+SYSTEM_DIRS=(
+    "bin"
+    "boot"
+    "dev"
+    "etc"
+    "lib"
+    "lib64"
+    "mnt"
+    "opt"
+    "proc"
+    "root"
+    "run"
+    "sbin"
+    "srv"
+    "sys"
+    "tmp"
+    "usr"
+    "var"
+    "lost+found"
+    "snap"
+    "swapfile"
+)
+
+# Subdirectories within home that are CRITICAL (priority 1)
+# Everything else under home = priority 2
+CRITICAL_PATHS=(
+    ".ssh"
+    ".gnupg"
+    ".brain.d"
+    "Documents/github-kyonax"
+    ".doom.d"
 )
 
 # --- Exclude Patterns ---
-# Paths/patterns to skip during scanning (regenerable or waste space)
-# Matched against the relative path from the scan root
-
+# Matched against relative path from source root — skips caches and junk
 EXCLUDE_PATTERNS=(
     # Caches (regenerable)
     ".cache"
@@ -57,11 +67,11 @@ EXCLUDE_PATTERNS=(
     ".gradle/caches"
     ".m2/repository"
     ".nvm/.cache"
+    ".nvm/versions"
     ".bundle/cache"
     ".gem/cache"
     ".composer/cache"
     # Build output
-    "target"
     ".venv"
     "venv"
     # Desktop/app junk
@@ -69,27 +79,11 @@ EXCLUDE_PATTERNS=(
     ".local/share/baloo"
     ".local/share/akonadi"
     ".local/share/recently-used.xbel"
-    # OS / system files (do NOT backup)
-    ".local/share/pacman"
-    ".local/share/systemd"
-    ".config/systemd"
-    "var/lib/pacman"
-    "var/cache/pacman"
-    "var/log"
-    "var/tmp"
-    "var/spool"
-    "etc"
-    "boot"
-    "usr"
-    "lib"
-    "lib64"
-    "opt"
-    "proc"
-    "sys"
-    "dev"
-    "run"
-    "tmp"
-    "lost+found"
+    ".local/share/gvfs-metadata"
+    # Large regenerable data
+    ".local/share/Steam"
+    ".local/share/lutris"
+    ".wine"
 )
 
 # --- NTFS-Incompatible Characters ---
@@ -143,44 +137,26 @@ human_size() {
     fi
 }
 
-# Resolve ~ prefix to actual home path
-resolve_path() {
-    local path="$1"
-    local source="$2"
-    local user="$3"
-
-    if [[ "$path" == ~/* ]]; then
-        echo "${source}/home/${user}/${path#\~/}"
-    else
-        echo "${source}${path}"
-    fi
+# Check if a top-level directory is a system dir
+is_system_dir() {
+    local dirname="$1"
+    for sysdir in "${SYSTEM_DIRS[@]}"; do
+        [[ "$dirname" == "$sysdir" ]] && return 0
+    done
+    return 1
 }
 
-# Resolve ~ prefix to target path
-resolve_target_path() {
-    local path="$1"
-    local target="$2"
-    local source="$3"
-    local user="$4"
-
-    if [[ "$path" == ~/* ]]; then
-        echo "${target}/home/${user}/${path#\~/}"
-    else
-        echo "${target}${path}"
-    fi
-}
-
-# Get relative path for manifest (from source root)
-get_relative_path() {
-    local path="$1"
-    local source="$2"
-    local user="$3"
-
-    if [[ "$path" == ~/* ]]; then
-        echo "home/${user}/${path#\~/}"
-    else
-        echo "${path#/}"
-    fi
+# Check if a file path falls under a critical subdirectory
+is_critical_path() {
+    local rel_path="$1"
+    local user="$2"
+    for crit in "${CRITICAL_PATHS[@]}"; do
+        if [[ "$rel_path" == "home/${user}/${crit}/"* ]] || \
+           [[ "$rel_path" == "home/${user}/${crit}" ]]; then
+            return 0
+        fi
+    done
+    return 1
 }
 
 # Check if a path matches any exclude pattern
