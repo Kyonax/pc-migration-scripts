@@ -4,13 +4,12 @@
 # exists on the Storage disk, and produces a report + JSON manifest.
 #
 # Usage:
-#   ./checker.sh --source /mnt --target /mnt/recovery/backup-arch-2026-03-20 \
+#   ./checker.sh --source /mnt/source --target /mnt/recovery/backup-arch-2026-03-20 \
 #                --user kyonax --output /tmp/recovery-scripts
 
 set -euo pipefail
 
-# Error trap — show where the script failed
-trap 'echo ""; echo "ERROR: checker.sh failed at line $LINENO (exit code $?)"; echo "Last command: $BASH_COMMAND"; exit 1' ERR
+trap 'tput rmcup 2>/dev/null; echo ""; echo "ERROR: checker.sh failed at line $LINENO (exit code $?)"; echo "Last command: $BASH_COMMAND"; exit 1' ERR
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ ! -f "${SCRIPT_DIR}/config.sh" ]]; then
@@ -48,6 +47,13 @@ REPORT_FILE="${OUTPUT_DIR}/backup_report.md"
 MANIFEST_FILE="${OUTPUT_DIR}/backup_manifest.json"
 SCAN_START=$(date +%s)
 
+# --- Validation (before TUI) ---
+if [[ ! -d "$SOURCE" ]]; then
+    echo "ERROR: Source directory does not exist: $SOURCE"
+    echo "       Is the broken system's root partition mounted?"
+    exit 1
+fi
+
 # --- Counters ---
 total_files=0
 needs_backup_count=0
@@ -63,6 +69,10 @@ large_file_count=0
 ntfs_incompatible_count=0
 dir_index=0
 dir_total=${#SCAN_DIRS[@]}
+current_dir_name=""
+current_dir_files=0
+current_dir_total=0
+last_file=""
 
 # --- JSON Manifest Array ---
 manifest_entries=()
@@ -73,58 +83,124 @@ table_already_saved=()
 table_excluded=()
 
 # ═══════════════════════════════════════
-#   BANNER
+#   TUI SETUP
 # ═══════════════════════════════════════
-print_header "BACKUP CHECKER — pc-migration-scripts"
+TERM_LINES=$(tput lines 2>/dev/null || echo 24)
+TERM_COLS=$(tput cols 2>/dev/null || echo 80)
+DASHBOARD_HEIGHT=14
+LOG_START=$((DASHBOARD_HEIGHT + 1))
 
-printf "  ${C_BOLD}Source:${C_RESET}   %s\n" "$SOURCE"
-printf "  ${C_BOLD}Target:${C_RESET}   %s\n" "$TARGET"
-printf "  ${C_BOLD}User:${C_RESET}     %s\n" "$USER_NAME"
-printf "  ${C_BOLD}Output:${C_RESET}   %s\n" "$OUTPUT_DIR"
-printf "  ${C_BOLD}Started:${C_RESET}  %s\n" "$(date '+%Y-%m-%d %H:%M:%S')"
-echo ""
+# Cleanup on exit — restore terminal
+cleanup_tui() {
+    # Reset scroll region to full terminal
+    printf '\033[;r'
+    # Move cursor below everything
+    tput cup "$TERM_LINES" 0 2>/dev/null || true
+    echo ""
+}
+trap cleanup_tui EXIT
 
-# --- Validation ---
-if [[ ! -d "$SOURCE" ]]; then
-    printf "  ${C_RED}✗${C_RESET} Source directory does not exist: %s\n" "$SOURCE"
-    printf "    Is the broken system's root partition mounted?\n"
-    exit 1
-fi
-print_status "✓" "$C_GREEN" "Source exists" "$SOURCE"
+# Clear screen and set up regions
+clear
 
-if [[ -d "$TARGET" ]]; then
-    print_status "✓" "$C_GREEN" "Target exists" "$TARGET (incremental scan)"
-else
-    print_status "○" "$C_YELLOW" "Target absent" "$TARGET (fresh backup — all files will be NEEDS_BACKUP)"
-fi
+# Draw dashboard (fixed top area)
+draw_dashboard() {
+    # Save cursor position
+    tput sc 2>/dev/null || true
 
-# Show scan tiers
-echo ""
-print_subheader "Scan Configuration"
-echo ""
-local_crit=0 local_imp=0 local_sys=0
-for entry in "${SCAN_DIRS[@]}"; do
-    IFS='|' read -r p _ _ <<< "$entry"
-    case "$p" in 1) ((local_crit++)) || true;; 2) ((local_imp++)) || true;; 3) ((local_sys++)) || true;; esac
-done
-printf "  ${C_BOLD}Directories:${C_RESET}  %d total (%d CRITICAL, %d IMPORTANT, %d SYSTEM)\n" "$dir_total" "$local_crit" "$local_imp" "$local_sys"
-printf "  ${C_BOLD}Excludes:${C_RESET}     %d patterns\n" "${#EXCLUDE_PATTERNS[@]}"
-printf "  ${C_BOLD}Large file:${C_RESET}   >%s flagged\n" "$(human_size $LARGE_FILE_THRESHOLD)"
-echo ""
+    # Move to top
+    tput cup 0 0 2>/dev/null || true
 
-# Show all directories to be scanned
-for entry in "${SCAN_DIRS[@]}"; do
-    IFS='|' read -r priority config_path description <<< "$entry"
-    local_source=$(resolve_path "$config_path" "$SOURCE" "$USER_NAME")
-    exists_mark=""
-    if [[ -d "$local_source" ]]; then
-        exists_mark="${C_GREEN}✓${C_RESET}"
+    # Line 0: Header
+    printf "${C_BOLD}${C_CYAN}══════════════════════════════════════════════════════════════${C_RESET}\n"
+    # Line 1: Title
+    printf "${C_BOLD}${C_CYAN}  BACKUP CHECKER — pc-migration-scripts${C_RESET}%*s\n" 22 ""
+    # Line 2: Header bottom
+    printf "${C_BOLD}${C_CYAN}══════════════════════════════════════════════════════════════${C_RESET}\n"
+
+    # Line 3: Source / Target
+    printf "  Source: ${C_BOLD}%-25s${C_RESET} Target: ${C_BOLD}%s${C_RESET}\033[K\n" "$SOURCE" "$(basename "$TARGET")"
+
+    # Line 4: Overall progress bar
+    overall_pct=0
+    [[ $dir_total -gt 0 ]] && overall_pct=$(( (dir_index * 100) / dir_total ))
+    bar=$(progress_bar "$overall_pct")
+    elapsed=$(elapsed_since "$SCAN_START")
+    rate=0
+    elapsed_secs=$(( $(date +%s) - SCAN_START ))
+    [[ $elapsed_secs -gt 0 ]] && [[ $total_files -gt 0 ]] && rate=$(( total_files / elapsed_secs ))
+    printf "  [${C_CYAN}%s${C_RESET}] ${C_BOLD}%3d%%${C_RESET}  %d/%d dirs  %s" \
+        "$bar" "$overall_pct" "$dir_index" "$dir_total" "$elapsed"
+    [[ $rate -gt 0 ]] && printf "  %d files/s" "$rate"
+    printf "\033[K\n"
+
+    # Line 5: Current directory
+    if [[ -n "$current_dir_name" ]]; then
+        dir_pct=0
+        [[ $current_dir_total -gt 0 ]] && dir_pct=$(( (current_dir_files * 100) / current_dir_total ))
+        printf "  Scanning: ${C_BOLD}%s${C_RESET} [%d/%d %d%%]\033[K\n" \
+            "$current_dir_name" "$current_dir_files" "$current_dir_total" "$dir_pct"
     else
-        exists_mark="${C_RED}✗${C_RESET}"
+        printf "  ${C_DIM}Waiting to start...${C_RESET}\033[K\n"
     fi
-    printf "    ${C_DIM}P%s${C_RESET} %b %-45s %s\n" "$priority" "$exists_mark" "$config_path" "${C_DIM}${description}${C_RESET}"
-done
-echo ""
+
+    # Line 6: separator
+    printf "  ${C_DIM}──────────────────────────────────────────────────────────${C_RESET}\n"
+
+    # Line 7-8: Counters (two columns)
+    transfer_total_live=$((needs_backup_bytes + partial_bytes))
+    printf "  ${C_RED}+${C_RESET} BACKUP:   %'6d  %8s    ${C_GREEN}✓${C_RESET} SAVED:    %'6d  %8s\033[K\n" \
+        "$((needs_backup_count + partial_count))" "$(human_size $transfer_total_live)" \
+        "$already_saved_count" "$(human_size $already_saved_bytes)"
+    printf "  ${C_YELLOW}⊘${C_RESET} EXCLUDED: %'6d  %8s    ${C_MAGENTA}⤳${C_RESET} SYMLINKS: %'6d\033[K\n" \
+        "$excluded_count" "$(human_size $excluded_bytes)" \
+        "$symlink_count"
+
+    # Line 9: Total scanned
+    printf "  ${C_BOLD}Total: %'d files scanned${C_RESET}" "$total_files"
+    [[ $large_file_count -gt 0 ]] && printf "  ${C_YELLOW}⚠ %d large${C_RESET}" "$large_file_count"
+    [[ $ntfs_incompatible_count -gt 0 ]] && printf "  ${C_YELLOW}⚠ %d NTFS${C_RESET}" "$ntfs_incompatible_count"
+    printf "\033[K\n"
+
+    # Line 10: separator
+    printf "  ${C_DIM}──────────────────────────────────────────────────────────${C_RESET}\n"
+
+    # Line 11: Last file
+    if [[ -n "$last_file" ]]; then
+        # Truncate to fit terminal width
+        display_file="$last_file"
+        max_len=$(( TERM_COLS - 4 ))
+        if [[ ${#display_file} -gt $max_len ]]; then
+            display_file="...${display_file: -$((max_len - 3))}"
+        fi
+        printf "  ${C_DIM}%s${C_RESET}\033[K\n" "$display_file"
+    else
+        printf "\033[K\n"
+    fi
+
+    # Line 12: Log header
+    printf "  ${C_DIM}── File Log ──────────────────────────────────────────────${C_RESET}\n"
+
+    # Line 13: blank spacer
+    printf "\033[K"
+
+    # Restore cursor position
+    tput rc 2>/dev/null || true
+}
+
+# Print a line in the scrolling log area
+log_line() {
+    # Move cursor to the scroll region and print
+    printf "%s\n" "$1"
+}
+
+# Set scroll region (lines LOG_START to bottom)
+printf '\033[%d;%dr' "$LOG_START" "$TERM_LINES"
+# Move cursor to scroll region start
+tput cup "$LOG_START" 0 2>/dev/null || true
+
+# Initial dashboard draw
+draw_dashboard
 
 # --- Add a manifest entry ---
 add_entry() {
@@ -177,33 +253,32 @@ add_entry() {
     esac
 }
 
-# --- Scan a single file (verbose) ---
+# --- Scan a single file ---
 scan_file() {
     local file_path="$1"
-    local source_root="$2"
-    local target_root="$3"
-    local priority="$4"
-    local scan_dir_path="$5"
+    local priority="$2"
 
     ((total_files++)) || true
+    ((current_dir_files++)) || true
 
     local rel_from_source="${file_path#${SOURCE}/}"
     local target_file="${TARGET}/${rel_from_source}"
     local basename_file
     basename_file=$(basename "$file_path")
 
+    last_file="$rel_from_source"
+
     # Symlink
     if [[ -L "$file_path" ]]; then
         local link_target
         link_target=$(readlink "$file_path" 2>/dev/null || echo "unreadable")
         add_entry "$file_path" "$target_file" "$rel_from_source" 0 "SYMLINK" "$priority" "symlink" "$link_target"
-        printf "    ${C_MAGENTA}⤳${C_RESET} ${C_DIM}SYMLINK${C_RESET}  %s → %s\n" "$rel_from_source" "$link_target"
+        log_line "  ${C_MAGENTA}⤳${C_RESET} ${C_DIM}$rel_from_source → $link_target${C_RESET}"
         return
     fi
 
     # Special file
     if [[ ! -f "$file_path" ]]; then
-        printf "    ${C_DIM}⊘ SKIP     %s (special file)${C_RESET}\n" "$rel_from_source"
         return
     fi
 
@@ -215,20 +290,8 @@ scan_file() {
     # Excluded
     if is_excluded "$rel_from_source"; then
         add_entry "$file_path" "$target_file" "$rel_from_source" "$size_bytes" "EXCLUDED" "$priority" "file" "null" "matches exclude pattern"
-        printf "    ${C_YELLOW}⊘${C_RESET} ${C_DIM}EXCLUDED${C_RESET} %s ${C_DIM}(%s)${C_RESET}\n" "$rel_from_source" "$size_human"
+        log_line "  ${C_YELLOW}⊘${C_RESET} ${C_DIM}$rel_from_source ($size_human)${C_RESET}"
         return
-    fi
-
-    # NTFS-incompatible check (flag only, still classify normally)
-    local ntfs_flag=""
-    if has_ntfs_bad_chars "$basename_file"; then
-        ntfs_flag=" ${C_RED}[NTFS!]${C_RESET}"
-    fi
-
-    # Large file check (flag only)
-    local large_flag=""
-    if [[ $size_bytes -ge $LARGE_FILE_THRESHOLD ]]; then
-        large_flag=" ${C_YELLOW}[>1G]${C_RESET}"
     fi
 
     # Compare with target
@@ -238,14 +301,22 @@ scan_file() {
 
         if [[ "$size_bytes" -eq "$target_size" ]]; then
             add_entry "$file_path" "$target_file" "$rel_from_source" "$size_bytes" "ALREADY_SAVED" "$priority" "file"
-            printf "    ${C_GREEN}✓${C_RESET} ${C_DIM}SAVED${C_RESET}    %s ${C_DIM}(%s)${C_RESET}\n" "$rel_from_source" "$size_human"
+            log_line "  ${C_GREEN}✓${C_RESET} ${C_DIM}$rel_from_source ($size_human)${C_RESET}"
         else
             add_entry "$file_path" "$target_file" "$rel_from_source" "$size_bytes" "PARTIAL" "$priority" "file" "null" "size mismatch: source=${size_bytes} target=${target_size}"
-            printf "    ${C_YELLOW}△${C_RESET} PARTIAL  %s ${C_DIM}(%s vs %s on target)${C_RESET}%b%b\n" "$rel_from_source" "$size_human" "$(human_size "$target_size")" "$ntfs_flag" "$large_flag"
+            log_line "  ${C_YELLOW}△${C_RESET} $rel_from_source ${C_DIM}($size_human vs $(human_size "$target_size"))${C_RESET}"
         fi
     else
         add_entry "$file_path" "$target_file" "$rel_from_source" "$size_bytes" "NEEDS_BACKUP" "$priority" "file"
-        printf "    ${C_RED}+${C_RESET} ${C_BOLD}BACKUP${C_RESET}   %s ${C_DIM}(%s)${C_RESET}%b%b\n" "$rel_from_source" "$size_human" "$ntfs_flag" "$large_flag"
+        local flags=""
+        [[ $size_bytes -ge $LARGE_FILE_THRESHOLD ]] && flags=" ${C_YELLOW}[>1G]${C_RESET}"
+        has_ntfs_bad_chars "$basename_file" && flags="${flags} ${C_RED}[NTFS]${C_RESET}"
+        log_line "  ${C_RED}+${C_RESET} ${C_BOLD}$rel_from_source${C_RESET} ${C_DIM}($size_human)${C_RESET}${flags}"
+    fi
+
+    # Update dashboard every 25 files
+    if (( total_files % 25 == 0 )); then
+        draw_dashboard
     fi
 }
 
@@ -253,44 +324,31 @@ scan_file() {
 scan_directory() {
     local dir_path="$1"
     local priority="$2"
-    local config_path="$3"
-    local description="$4"
+    local description="$3"
 
     if [[ ! -d "$dir_path" ]]; then
-        printf "  ${C_RED}✗${C_RESET} Directory does not exist: %s\n" "$dir_path"
+        log_line "  ${C_RED}✗${C_RESET} Not found: $dir_path"
         return
     fi
 
-    # Count files first for percentage
-    local expected_count
-    expected_count=$(find "$dir_path" -mindepth 1 \( -type f -o -type l \) 2>/dev/null | wc -l)
+    # Count files for progress
+    current_dir_total=$(find "$dir_path" -mindepth 1 \( -type f -o -type l \) 2>/dev/null | wc -l)
+    current_dir_files=0
+    current_dir_name="$description"
 
-    # Get directory size
-    local dir_size_bytes
-    dir_size_bytes=$(du -sb "$dir_path" 2>/dev/null | awk '{print $1}' || echo 0)
-    local dir_size_human
-    dir_size_human=$(human_size "$dir_size_bytes")
+    draw_dashboard
 
-    printf "  ${C_BOLD}%s${C_RESET} ${C_DIM}(%s files, %s)${C_RESET}\n" "$dir_path" "$expected_count" "$dir_size_human"
-    echo ""
-
-    local file_count=0
-    local dir_start
-    dir_start=$(date +%s)
+    local prio_color=""
+    case "$priority" in
+        1) prio_color="$C_RED" ;;
+        2) prio_color="$C_YELLOW" ;;
+        3) prio_color="$C_CYAN" ;;
+    esac
+    log_line ""
+    log_line "  ${prio_color}${C_BOLD}── P$priority: $description ──${C_RESET} ${C_DIM}($current_dir_total files in $dir_path)${C_RESET}"
 
     while IFS= read -r -d '' file; do
-        scan_file "$file" "$SOURCE" "$TARGET" "$priority" "$config_path"
-        ((file_count++)) || true
-
-        # Inline progress every 100 files
-        if (( file_count % 100 == 0 )); then
-            local dir_pct=0
-            [[ "$expected_count" -gt 0 ]] && dir_pct=$(( (file_count * 100) / expected_count ))
-            local dir_elapsed
-            dir_elapsed=$(elapsed_since "$dir_start")
-            printf "\n    ${C_DIM}── %d/%d files (%d%%) — elapsed %s ──${C_RESET}\n\n" \
-                "$file_count" "$expected_count" "$dir_pct" "$dir_elapsed"
-        fi
+        scan_file "$file" "$priority"
     done < <(find "$dir_path" -mindepth 1 \( -type f -o -type l \) -print0 2>/dev/null)
 
     # Empty directories
@@ -299,28 +357,16 @@ scan_directory() {
         local target_dir="${TARGET}/${dir_rel}"
         if [[ -z "$(ls -A "$dir" 2>/dev/null)" ]]; then
             add_entry "$dir" "$target_dir" "$dir_rel" 0 "NEEDS_BACKUP" "$priority" "directory" "null" "empty directory"
-            printf "    ${C_CYAN}▪${C_RESET} ${C_DIM}EMPTYDIR${C_RESET} %s\n" "$dir_rel"
+            log_line "  ${C_CYAN}▪${C_RESET} ${C_DIM}$dir_rel (empty dir)${C_RESET}"
         fi
     done < <(find "$dir_path" -mindepth 1 -type d -empty -print0 2>/dev/null)
 
-    local dir_elapsed
-    dir_elapsed=$(elapsed_since "$dir_start")
-    local rate=0
-    local dir_secs=$(( $(date +%s) - dir_start ))
-    [[ $dir_secs -gt 0 ]] && rate=$(( file_count / dir_secs ))
-
-    echo ""
-    printf "    ${C_GREEN}Done:${C_RESET} %d files in %s" "$file_count" "$dir_elapsed"
-    [[ $rate -gt 0 ]] && printf " (%d files/sec)" "$rate"
-    echo ""
+    draw_dashboard
 }
 
 # ═══════════════════════════════════════
 #   MAIN SCAN
 # ═══════════════════════════════════════
-print_subheader "Scanning Directories"
-echo ""
-
 scanned_paths=()
 
 for entry in "${SCAN_DIRS[@]}"; do
@@ -329,47 +375,36 @@ for entry in "${SCAN_DIRS[@]}"; do
 
     local_source=$(resolve_path "$config_path" "$SOURCE" "$USER_NAME")
 
-    # Overall progress
-    overall_pct=$(( (dir_index * 100) / dir_total ))
-    bar=$(progress_bar "$overall_pct")
-    elapsed=$(elapsed_since "$SCAN_START")
-
-    printf "${C_BOLD}[%d/%d] [%s] %3d%% ${C_RESET}${C_DIM}elapsed %s${C_RESET}\n" \
-        "$dir_index" "$dir_total" "$bar" "$overall_pct" "$elapsed"
-
-    # Priority label
-    prio_label="" ; prio_color=""
-    case "$priority" in
-        1) prio_label="CRITICAL" prio_color="$C_RED" ;;
-        2) prio_label="IMPORTANT" prio_color="$C_YELLOW" ;;
-        3) prio_label="SYSTEM" prio_color="$C_CYAN" ;;
-    esac
-    printf "${prio_color}  [P%s %s]${C_RESET} %s\n" "$priority" "$prio_label" "$description"
-
     # Dedup check
     skip=false
     for scanned in "${scanned_paths[@]:-}"; do
         if [[ -n "$scanned" ]] && [[ "$local_source" == "$scanned"/* ]]; then
-            printf "  ${C_YELLOW}↷${C_RESET} ${C_DIM}Skipped (already covered by parent scan: %s)${C_RESET}\n\n" "$scanned"
+            log_line "  ${C_YELLOW}↷${C_RESET} ${C_DIM}$config_path (covered by parent)${C_RESET}"
             skip=true
             break
         fi
     done
     [[ "$skip" == "true" ]] && continue
 
-    scan_directory "$local_source" "$priority" "$config_path" "$description"
+    scan_directory "$local_source" "$priority" "$description"
     scanned_paths+=("$local_source")
-    echo ""
 done
 
+# Final dashboard update
+current_dir_name="COMPLETE"
+current_dir_files=0
+current_dir_total=0
+dir_index=$dir_total
+draw_dashboard
+
 # ═══════════════════════════════════════
-#   GENERATE OUTPUTS
+#   GENERATE OUTPUTS (in scroll region)
 # ═══════════════════════════════════════
-print_subheader "Generating Outputs"
-echo ""
+log_line ""
+log_line "  ${C_CYAN}${C_BOLD}── Generating Outputs ──${C_RESET}"
 
 # JSON Manifest
-printf "  ${C_CYAN}▸${C_RESET} Writing manifest: %s ..." "$MANIFEST_FILE"
+log_line "  ${C_CYAN}▸${C_RESET} Writing manifest: $MANIFEST_FILE"
 {
     echo "["
     first=true
@@ -384,10 +419,10 @@ printf "  ${C_CYAN}▸${C_RESET} Writing manifest: %s ..." "$MANIFEST_FILE"
     echo "]"
 } > "$MANIFEST_FILE"
 manifest_size=$(stat -c '%s' "$MANIFEST_FILE" 2>/dev/null || echo 0)
-printf " ${C_GREEN}OK${C_RESET} (%s, %d entries)\n" "$(human_size "$manifest_size")" "${#manifest_entries[@]}"
+log_line "    ${C_GREEN}✓${C_RESET} OK ($(human_size "$manifest_size"), ${#manifest_entries[@]} entries)"
 
 # Report
-printf "  ${C_CYAN}▸${C_RESET} Writing report:   %s ..." "$REPORT_FILE"
+log_line "  ${C_CYAN}▸${C_RESET} Writing report: $REPORT_FILE"
 
 transfer_total=$((needs_backup_bytes + partial_bytes))
 transfer_human=$(human_size $transfer_total)
@@ -476,59 +511,29 @@ fi
 } > "$REPORT_FILE"
 
 report_size=$(stat -c '%s' "$REPORT_FILE" 2>/dev/null || echo 0)
-printf " ${C_GREEN}OK${C_RESET} (%s)\n" "$(human_size "$report_size")"
+log_line "    ${C_GREEN}✓${C_RESET} OK ($(human_size "$report_size"))"
 
 # ═══════════════════════════════════════
-#   FINAL SUMMARY
+#   FINAL SUMMARY (in scroll region)
 # ═══════════════════════════════════════
 total_elapsed=$(elapsed_since "$SCAN_START")
 total_secs=$(( $(date +%s) - SCAN_START ))
 total_rate=0
 [[ $total_secs -gt 0 ]] && total_rate=$(( total_files / total_secs ))
 
-print_header "SCAN COMPLETE"
-
-printf "  ${C_BOLD}Total scanned:${C_RESET}       %'d files in %s" "$total_files" "$total_elapsed"
-[[ $total_rate -gt 0 ]] && printf " (%d files/sec)" "$total_rate"
-echo ""
-echo ""
-
-# Status breakdown with visual bars
-total_actionable=$((needs_backup_count + partial_count))
-printf "  ${C_RED}█${C_RESET} ${C_BOLD}To transfer:${C_RESET}       %'6d files  %10s\n" "$total_actionable" "$transfer_human"
-printf "    ${C_DIM}├─ Needs backup:    %'6d files  %10s${C_RESET}\n" "$needs_backup_count" "$(human_size $needs_backup_bytes)"
-printf "    ${C_DIM}└─ Partial/changed: %'6d files  %10s${C_RESET}\n" "$partial_count" "$(human_size $partial_bytes)"
-printf "  ${C_GREEN}█${C_RESET} ${C_BOLD}Already saved:${C_RESET}     %'6d files  %10s\n" "$already_saved_count" "$saved_human"
-printf "  ${C_YELLOW}█${C_RESET} ${C_BOLD}Excluded:${C_RESET}          %'6d files  %10s\n" "$excluded_count" "$excluded_human"
-printf "  ${C_MAGENTA}█${C_RESET} ${C_BOLD}Symlinks:${C_RESET}          %'6d\n" "$symlink_count"
-echo ""
-
-# Warnings
-if [[ $large_file_count -gt 0 ]]; then
-    printf "  ${C_YELLOW}⚠${C_RESET}  Large files (>1G): %d — review in report\n" "$large_file_count"
-fi
-if [[ $ntfs_incompatible_count -gt 0 ]]; then
-    printf "  ${C_YELLOW}⚠${C_RESET}  NTFS-incompatible:  %d — will be tar-bundled by mover\n" "$ntfs_incompatible_count"
-fi
-echo ""
-
-# Space check
-printf "  ${C_BOLD}Transfer size:${C_RESET}       %s\n" "$transfer_human"
-printf "  ${C_BOLD}Available on target:${C_RESET}  %s\n" "$target_avail"
-
-if [[ -n "$target_mount" ]] && [[ "$transfer_total" -gt "$target_mount" ]]; then
-    printf "\n  ${C_BG_RED}${C_WHITE} ✗ NOT ENOUGH SPACE — transfer will fail! ${C_RESET}\n"
-elif [[ -n "$target_mount" ]]; then
-    usage_pct=$(( (transfer_total * 100) / target_mount ))
-    printf "  ${C_DIM}Transfer will use %d%% of available space${C_RESET}\n" "$usage_pct"
-fi
-echo ""
-
-# Output files
-print_subheader "Output Files"
-echo ""
-printf "  ${C_CYAN}📋${C_RESET} Report:   %s\n" "$REPORT_FILE"
-printf "  ${C_CYAN}📦${C_RESET} Manifest: %s\n" "$MANIFEST_FILE"
-echo ""
-printf "  ${C_BOLD}${C_GREEN}Review the report before running mover.sh${C_RESET}\n"
-echo ""
+log_line ""
+log_line "  ${C_BOLD}${C_GREEN}══════════════════════════════════════════════════════════════${C_RESET}"
+log_line "  ${C_BOLD}${C_GREEN}  SCAN COMPLETE${C_RESET}  $total_files files in $total_elapsed ($total_rate files/s)"
+log_line "  ${C_BOLD}${C_GREEN}══════════════════════════════════════════════════════════════${C_RESET}"
+log_line ""
+log_line "  ${C_RED}█${C_RESET} To transfer:   $((needs_backup_count + partial_count)) files ($transfer_human)"
+log_line "  ${C_GREEN}█${C_RESET} Already saved: $already_saved_count files ($saved_human)"
+log_line "  ${C_YELLOW}█${C_RESET} Excluded:      $excluded_count files ($excluded_human)"
+log_line ""
+log_line "  Transfer: $transfer_human | Available: $target_avail"
+log_line ""
+log_line "  ${C_CYAN}📋${C_RESET} Report:   $REPORT_FILE"
+log_line "  ${C_CYAN}📦${C_RESET} Manifest: $MANIFEST_FILE"
+log_line ""
+log_line "  ${C_BOLD}${C_GREEN}Review the report, then run mover.sh${C_RESET}"
+log_line ""
