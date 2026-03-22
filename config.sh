@@ -104,6 +104,8 @@ EXCLUDE_PATTERNS=(
     ".local/share/Steam"
     ".local/share/lutris"
     ".wine"
+    # Storage disk (backup target — do NOT back up itself)
+    "Storage"
 )
 
 # Directories to PRUNE during find (never descend into these)
@@ -132,6 +134,7 @@ PRUNE_DIRS=(
     "target"
     "dist"
     "build"
+    "Storage"
 )
 
 # --- NTFS-Incompatible Characters ---
