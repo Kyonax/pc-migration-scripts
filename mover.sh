@@ -29,11 +29,29 @@ while [[ $# -gt 0 ]]; do
         --source)   SOURCE="$2"; shift 2 ;;
         --target)   TARGET="$2"; shift 2 ;;
         -h|--help)
-            echo "Usage: $0 --manifest FILE [--source DIR] [--target DIR]"
+            echo "mover.sh — Backup Transfer with Progress"
             echo ""
-            echo "  --manifest  Path to backup_manifest.json from checker.sh (required)"
-            echo "  --source    Root of the broken system (default: $DEFAULT_SOURCE)"
-            echo "  --target    Backup destination directory (default: $DEFAULT_TARGET)"
+            echo "Reads the JSON manifest from checker.sh and transfers all NEEDS_BACKUP"
+            echo "and PARTIAL files to the target with a TUI dashboard showing progress,"
+            echo "speed, and ETA. Creates tar archives for permission-critical dirs."
+            echo ""
+            echo "Usage: $0 --manifest FILE [OPTIONS]"
+            echo ""
+            echo "Options:"
+            echo "  --manifest FILE    Path to backup_manifest.json from checker.sh (required)"
+            echo "  --source DIR       Root of the broken system (default: $DEFAULT_SOURCE)"
+            echo "  --target DIR       Backup destination directory (default: $DEFAULT_TARGET)"
+            echo "  -h, --help         Show this help message"
+            echo ""
+            echo "Examples:"
+            echo "  $0 --manifest /tmp/recovery-scripts/backup_manifest.json"
+            echo "  $0 --manifest ./backup_manifest.json --source /mnt/source --target /mnt/recovery/backup"
+            echo ""
+            echo "Output files:"
+            echo "  mover_log.txt              Timestamped log of all operations"
+            echo "  ssh-keys.tar.gz            SSH keys with Linux permissions"
+            echo "  gnupg-keys.tar.gz          GPG keys with Linux permissions"
+            echo "  ntfs-incompatible.tar.gz   Files with NTFS-bad characters (if any)"
             exit 0
             ;;
         *) echo "Unknown option: $1"; exit 1 ;;

@@ -1,6 +1,27 @@
 #!/usr/bin/env bash
 # config.sh — Shared configuration for pc-migration-scripts
-# Sourced by checker.sh and mover.sh
+# Sourced by checker.sh and mover.sh — not meant to be run directly.
+
+# If run directly with --help or no sourcing context, show info
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    if [[ "${1:-}" == "-h" || "${1:-}" == "--help" || $# -eq 0 ]]; then
+        echo "config.sh — Shared Configuration"
+        echo ""
+        echo "This file is sourced by checker.sh and mover.sh. It is not"
+        echo "meant to be executed directly."
+        echo ""
+        echo "Contains:"
+        echo "  - Default mount points (SOURCE, TARGET, USER)"
+        echo "  - SYSTEM_DIRS        Top-level OS dirs to skip"
+        echo "  - CRITICAL_PATHS     Subdirs that get priority 1"
+        echo "  - EXCLUDE_PATTERNS   File/dir patterns to skip"
+        echo "  - PRUNE_DIRS         Dirs find should never enter"
+        echo "  - Helper functions    human_size, progress_bar, etc."
+        echo ""
+        echo "Edit this file to customize scan behavior."
+        exit 0
+    fi
+fi
 
 # --- Default Mount Points ---
 # /mnt/source  = broken system root (read-only)

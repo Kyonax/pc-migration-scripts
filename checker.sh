@@ -33,13 +33,30 @@ while [[ $# -gt 0 ]]; do
         --output)  OUTPUT_DIR="$2"; shift 2 ;;
         --save-packages) SAVE_PACKAGES=true; shift ;;
         -h|--help)
-            echo "Usage: $0 [--source DIR] [--target DIR] [--user NAME] [--output DIR] [--save-packages]"
+            echo "checker.sh — Backup Analysis & Comparison"
             echo ""
-            echo "  --source         Root of the broken system (default: $DEFAULT_SOURCE)"
-            echo "  --target         Backup destination directory (default: $DEFAULT_TARGET)"
-            echo "  --user           Username on the broken system (default: $DEFAULT_USER)"
-            echo "  --output         Directory for report and manifest (default: $DEFAULT_OUTPUT)"
-            echo "  --save-packages  Extract pacman/yay package lists (does not affect reports)"
+            echo "Scans the entire source disk, skips system directories, compares"
+            echo "each file against the target, and produces a report + JSON manifest."
+            echo ""
+            echo "Usage: $0 [OPTIONS]"
+            echo ""
+            echo "Options:"
+            echo "  --source DIR       Root of the broken system (default: $DEFAULT_SOURCE)"
+            echo "  --target DIR       Backup destination directory (default: $DEFAULT_TARGET)"
+            echo "  --user NAME        Username on the broken system (default: $DEFAULT_USER)"
+            echo "  --output DIR       Directory for report and manifest (default: $DEFAULT_OUTPUT)"
+            echo "  --save-packages    Extract pacman/yay package lists (does not affect reports)"
+            echo "  -h, --help         Show this help message"
+            echo ""
+            echo "Examples:"
+            echo "  $0 --output /tmp/recovery-scripts"
+            echo "  $0 --output /tmp/recovery-scripts --save-packages"
+            echo "  $0 --source /mnt/source --target /mnt/recovery/backup --user kyonax --output ."
+            echo ""
+            echo "Output files:"
+            echo "  backup_report.md       Human-readable report (3 tables)"
+            echo "  backup_manifest.json   Machine-readable manifest for mover.sh"
+            echo "  package-lists/         Package lists (only with --save-packages)"
             exit 0
             ;;
         *) echo "Unknown option: $1"; exit 1 ;;
