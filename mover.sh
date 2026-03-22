@@ -1,16 +1,15 @@
 #!/usr/bin/env bash
-# mover.sh — Backup Transfer with Progress
+# mover.sh — Backup Transfer with Progress (TUI Dashboard)
 # Reads the JSON manifest produced by checker.sh and transfers all NEEDS_BACKUP
 # and PARTIAL entries to the Storage disk with verbose progress.
 #
 # Usage:
 #   ./mover.sh --manifest /tmp/recovery-scripts/backup_manifest.json \
-#              --source /mnt --target /mnt/recovery/backup-arch-2026-03-20
+#              --source /mnt/source --target /mnt/recovery/backup-arch-2026-03-20
 
 set -euo pipefail
 
-# Error trap — show where the script failed
-trap 'echo ""; echo "ERROR: mover.sh failed at line $LINENO (exit code $?)"; echo "Last command: $BASH_COMMAND"; exit 1' ERR
+trap 'tput rmcup 2>/dev/null; printf "\033[;r"; tput cup 999 0 2>/dev/null; echo ""; echo "ERROR: mover.sh failed at line $LINENO (exit code $?)"; echo "Last command: $BASH_COMMAND"; exit 1' ERR
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ ! -f "${SCRIPT_DIR}/config.sh" ]]; then
@@ -51,122 +50,51 @@ LOG_FILE="${SCRIPT_DIR}/mover_log.txt"
 NTFS_TAR="${TARGET}/ntfs-incompatible.tar.gz"
 TRANSFER_START=$(date +%s)
 
-# ═══════════════════════════════════════
-#   BANNER
-# ═══════════════════════════════════════
-print_header "BACKUP MOVER — pc-migration-scripts"
-
-printf "  ${C_BOLD}Manifest:${C_RESET}  %s\n" "$MANIFEST_FILE"
-printf "  ${C_BOLD}Source:${C_RESET}    %s\n" "$SOURCE"
-printf "  ${C_BOLD}Target:${C_RESET}    %s\n" "$TARGET"
-printf "  ${C_BOLD}Log:${C_RESET}       %s\n" "$LOG_FILE"
-printf "  ${C_BOLD}Started:${C_RESET}   %s\n" "$(date '+%Y-%m-%d %H:%M:%S')"
-echo ""
-
-# --- Validation ---
+# --- Validation (before TUI) ---
 if [[ ! -f "$MANIFEST_FILE" ]]; then
-    printf "  ${C_RED}✗${C_RESET} Manifest file not found: %s\n" "$MANIFEST_FILE"
+    echo "ERROR: Manifest file not found: $MANIFEST_FILE"
     exit 1
 fi
-print_status "✓" "$C_GREEN" "Manifest found" "$MANIFEST_FILE"
-
 if [[ ! -d "$SOURCE" ]]; then
-    printf "  ${C_RED}✗${C_RESET} Source directory does not exist: %s\n" "$SOURCE"
+    echo "ERROR: Source directory does not exist: $SOURCE"
     exit 1
 fi
-print_status "✓" "$C_GREEN" "Source exists" "$SOURCE"
-
 if ! command -v jq &>/dev/null; then
-    printf "  ${C_RED}✗${C_RESET} jq is required but not installed\n"
-    echo "    Run: pacman -S --noconfirm jq"
+    echo "ERROR: jq is required — pacman -S --noconfirm jq"
     exit 1
 fi
-print_status "✓" "$C_GREEN" "jq available" "$(jq --version 2>/dev/null || echo 'yes')"
 
-echo ""
-
-# ═══════════════════════════════════════
-#   PRE-FLIGHT ANALYSIS
-# ═══════════════════════════════════════
-print_subheader "Pre-Flight Analysis"
-echo ""
-
-printf "  ${C_CYAN}▸${C_RESET} Parsing manifest..."
-
-# Full manifest stats
+# --- Parse manifest (before TUI) ---
 total_entries=$(jq 'length' "$MANIFEST_FILE")
 transfer_count=$(jq '[.[] | select(.status == "NEEDS_BACKUP" or .status == "PARTIAL")] | length' "$MANIFEST_FILE")
 transfer_bytes=$(jq '[.[] | select(.status == "NEEDS_BACKUP" or .status == "PARTIAL") | .size_bytes] | add // 0' "$MANIFEST_FILE")
 transfer_human=$(human_size "$transfer_bytes")
 
-needs_count=$(jq '[.[] | select(.status == "NEEDS_BACKUP")] | length' "$MANIFEST_FILE")
-needs_bytes=$(jq '[.[] | select(.status == "NEEDS_BACKUP") | .size_bytes] | add // 0' "$MANIFEST_FILE")
-partial_count=$(jq '[.[] | select(.status == "PARTIAL")] | length' "$MANIFEST_FILE")
-partial_bytes=$(jq '[.[] | select(.status == "PARTIAL") | .size_bytes] | add // 0' "$MANIFEST_FILE")
-saved_count=$(jq '[.[] | select(.status == "ALREADY_SAVED")] | length' "$MANIFEST_FILE")
-excluded_count=$(jq '[.[] | select(.status == "EXCLUDED")] | length' "$MANIFEST_FILE")
-symlink_count=$(jq '[.[] | select(.status == "SYMLINK")] | length' "$MANIFEST_FILE")
-
-printf " ${C_GREEN}OK${C_RESET} (%d total entries)\n\n" "$total_entries"
-
-# Breakdown
-printf "  ${C_BOLD}Manifest breakdown:${C_RESET}\n"
-printf "    ${C_RED}█${C_RESET} NEEDS_BACKUP:  %'6d files  %10s\n" "$needs_count" "$(human_size "$needs_bytes")"
-printf "    ${C_YELLOW}█${C_RESET} PARTIAL:       %'6d files  %10s\n" "$partial_count" "$(human_size "$partial_bytes")"
-printf "    ${C_GREEN}█${C_RESET} ALREADY_SAVED: %'6d files  ${C_DIM}(skipped)${C_RESET}\n" "$saved_count"
-printf "    ${C_DIM}█${C_RESET} EXCLUDED:      %'6d files  ${C_DIM}(skipped)${C_RESET}\n" "$excluded_count"
-printf "    ${C_MAGENTA}█${C_RESET} SYMLINK:       %'6d        ${C_DIM}(skipped)${C_RESET}\n" "$symlink_count"
-echo ""
-printf "  ${C_BOLD}Total to transfer:${C_RESET}   %'d files, %s\n" "$transfer_count" "$transfer_human"
-echo ""
-
 if [[ "$transfer_count" -eq 0 ]]; then
-    printf "  ${C_GREEN}✓ Nothing to transfer — all files already saved.${C_RESET}\n\n"
+    echo "Nothing to transfer — all files already saved."
     exit 0
 fi
-
-# Priority breakdown
-printf "  ${C_BOLD}By priority:${C_RESET}\n"
-for p in 1 2 3; do
-    pcount="" ; psize="" ; plabel="" ; pcolor=""
-    pcount=$(jq "[.[] | select((.status == \"NEEDS_BACKUP\" or .status == \"PARTIAL\") and .priority == $p)] | length" "$MANIFEST_FILE")
-    psize=$(jq "[.[] | select((.status == \"NEEDS_BACKUP\" or .status == \"PARTIAL\") and .priority == $p) | .size_bytes] | add // 0" "$MANIFEST_FILE")
-    case "$p" in
-        1) plabel="CRITICAL"  pcolor="$C_RED" ;;
-        2) plabel="IMPORTANT" pcolor="$C_YELLOW" ;;
-        3) plabel="SYSTEM"    pcolor="$C_CYAN" ;;
-    esac
-    printf "    ${pcolor}P%d %-10s${C_RESET} %'6d files  %10s\n" "$p" "$plabel" "$pcount" "$(human_size "$psize")"
-done
-echo ""
 
 # Space check
 target_dir="$TARGET"
 [[ ! -d "$target_dir" ]] && target_dir="$(dirname "$TARGET")"
 avail_bytes=$(df -B1 "$target_dir" 2>/dev/null | tail -1 | awk '{print $4}')
-avail_human=$(human_size "$avail_bytes")
-
-printf "  ${C_BOLD}Disk space:${C_RESET}\n"
-printf "    Transfer size:    %s\n" "$transfer_human"
-printf "    Available space:  %s\n" "$avail_human"
 
 if [[ "$transfer_bytes" -gt "$avail_bytes" ]]; then
-    echo ""
-    printf "  ${C_BG_RED}${C_WHITE} ✗ NOT ENOUGH SPACE! ${C_RESET}\n"
-    printf "    Need %s but only %s available.\n" "$transfer_human" "$avail_human"
-    printf "    Free up space or reduce the manifest, then re-run.\n"
+    echo "ERROR: Not enough space! Need $(human_size "$transfer_bytes") but only $(human_size "$avail_bytes") available."
     exit 1
 fi
 
-usage_pct=$(( (transfer_bytes * 100) / avail_bytes ))
-printf "    Usage:            %d%% of available\n" "$usage_pct"
-printf "    ${C_GREEN}✓ Sufficient space${C_RESET}\n"
-echo ""
-
-# --- Create target directory ---
 mkdir -p "$TARGET"
-printf "  ${C_GREEN}✓${C_RESET} Target directory ready: %s\n" "$TARGET"
-echo ""
+
+# --- Counters ---
+current=0
+transferred_bytes=0
+error_count=0
+success_count=0
+ntfs_incompatible_files=()
+last_file=""
+last_status=""
 
 # --- Initialize log ---
 {
@@ -179,82 +107,118 @@ echo ""
 } > "$LOG_FILE"
 
 # ═══════════════════════════════════════
+#   TUI SETUP
+# ═══════════════════════════════════════
+TERM_LINES=$(tput lines 2>/dev/null || echo 24)
+TERM_COLS=$(tput cols 2>/dev/null || echo 80)
+DASHBOARD_HEIGHT=14
+LOG_START=$((DASHBOARD_HEIGHT + 1))
+
+cleanup_tui() {
+    printf '\033[;r'
+    tput cup "$TERM_LINES" 0 2>/dev/null || true
+    echo ""
+}
+trap cleanup_tui EXIT
+
+clear
+
+draw_dashboard() {
+    tput sc 2>/dev/null || true
+    tput cup 0 0 2>/dev/null || true
+
+    printf "${C_BOLD}${C_CYAN}══════════════════════════════════════════════════════════════${C_RESET}\n"
+    printf "${C_BOLD}${C_CYAN}  BACKUP MOVER — Transferring Files${C_RESET}%*s\n" 26 ""
+    printf "${C_BOLD}${C_CYAN}══════════════════════════════════════════════════════════════${C_RESET}\n"
+
+    # Line 3: Progress bar
+    pct=0
+    [[ $transfer_bytes -gt 0 ]] && pct=$(( (transferred_bytes * 100) / transfer_bytes ))
+    bar=$(progress_bar "$pct")
+    elapsed=$(elapsed_since "$TRANSFER_START")
+    printf "  [${C_CYAN}%s${C_RESET}] ${C_BOLD}%3d%%${C_RESET}  %d/%d files  %s\033[K\n" \
+        "$bar" "$pct" "$current" "$transfer_count" "$elapsed"
+
+    # Line 4: Transfer size
+    transferred_h=$(human_size "$transferred_bytes")
+    printf "  Transferred: ${C_BOLD}%s${C_RESET} / %s\033[K\n" "$transferred_h" "$transfer_human"
+
+    # Line 5: Speed & ETA
+    speed="--"
+    eta="--:--"
+    elapsed_secs=$(( $(date +%s) - TRANSFER_START ))
+    if [[ $elapsed_secs -gt 0 ]] && [[ $transferred_bytes -gt 0 ]]; then
+        bps=$(( transferred_bytes / elapsed_secs ))
+        speed="$(human_size "$bps")/s"
+        remaining=$(( transfer_bytes - transferred_bytes ))
+        if [[ $bps -gt 0 ]]; then
+            eta_s=$(( remaining / bps ))
+            eta=$(printf "%dm %02ds" "$(( eta_s / 60 ))" "$(( eta_s % 60 ))")
+        fi
+    fi
+    printf "  Speed: ${C_BOLD}%s${C_RESET}  ETA: ${C_BOLD}%s${C_RESET}\033[K\n" "$speed" "$eta"
+
+    # Line 6: separator
+    printf "  ${C_DIM}──────────────────────────────────────────────────────────${C_RESET}\n"
+
+    # Line 7-8: Counters
+    printf "  ${C_GREEN}✓${C_RESET} Copied:  %'6d    ${C_RED}✗${C_RESET} Errors:  %'6d    ${C_YELLOW}⚠${C_RESET} NTFS:  %'d\033[K\n" \
+        "$success_count" "$error_count" "${#ntfs_incompatible_files[@]}"
+    avail_now=$(df -B1 "$target_dir" 2>/dev/null | tail -1 | awk '{print $4}')
+    printf "  ${C_DIM}Disk free: %s${C_RESET}\033[K\n" "$(human_size "$avail_now")"
+
+    # Line 9: separator
+    printf "  ${C_DIM}──────────────────────────────────────────────────────────${C_RESET}\n"
+
+    # Line 10: Last file + status
+    if [[ -n "$last_file" ]]; then
+        display_file="$last_file"
+        max_len=$(( TERM_COLS - 12 ))
+        if [[ ${#display_file} -gt $max_len ]]; then
+            display_file="...${display_file: -$((max_len - 3))}"
+        fi
+        printf "  %s %s\033[K\n" "$last_status" "$display_file"
+    else
+        printf "\033[K\n"
+    fi
+
+    # Line 11: separator
+    printf "  ${C_DIM}── Transfer Log ──────────────────────────────────────────${C_RESET}\n"
+
+    printf "\033[K"
+
+    tput rc 2>/dev/null || true
+}
+
+log_line() {
+    printf "%s\n" "$1"
+}
+
+# Set scroll region
+printf '\033[%d;%dr' "$LOG_START" "$TERM_LINES"
+tput cup "$LOG_START" 0 2>/dev/null || true
+
+draw_dashboard
+
+# ═══════════════════════════════════════
 #   FILE TRANSFER
 # ═══════════════════════════════════════
-print_header "TRANSFERRING FILES"
-
-printf "  ${C_BOLD}Starting: %'d files, %s${C_RESET}\n\n" "$transfer_count" "$transfer_human"
-
-current=0
-transferred_bytes=0
-error_count=0
-success_count=0
-ntfs_incompatible_files=()
-current_priority=0
 
 while IFS=$'\t' read -r source_path target_path relative_path size_bytes status priority; do
     ((current++)) || true
 
-    # Priority change header
-    if [[ "$priority" != "$current_priority" ]]; then
-        current_priority="$priority"
-        plabel pcolor
-        case "$priority" in
-            1) plabel="CRITICAL"  pcolor="$C_RED" ;;
-            2) plabel="IMPORTANT" pcolor="$C_YELLOW" ;;
-            3) plabel="SYSTEM"    pcolor="$C_CYAN" ;;
-            *) plabel="OTHER"     pcolor="$C_DIM" ;;
-        esac
-        echo ""
-        printf "  ${pcolor}${C_BOLD}── Priority %s: %s ──${C_RESET}\n\n" "$priority" "$plabel"
-    fi
-
-    # Progress calculations
-    pct=0
-    [[ "$transfer_bytes" -gt 0 ]] && pct=$(( (transferred_bytes * 100) / transfer_bytes ))
-    bar=""
-    bar=$(progress_bar "$pct")
-    transferred_human=""
-    transferred_human=$(human_size "$transferred_bytes")
-    file_size_human=""
     file_size_human=$(human_size "$size_bytes")
-    elapsed=""
-    elapsed=$(elapsed_since "$TRANSFER_START")
 
-    # ETA calculation
-    eta="--:--"
-    elapsed_secs=$(( $(date +%s) - TRANSFER_START ))
-    if [[ $transferred_bytes -gt 0 ]] && [[ $elapsed_secs -gt 0 ]]; then
-        remaining_bytes=$(( transfer_bytes - transferred_bytes ))
-        bytes_per_sec=$(( transferred_bytes / elapsed_secs ))
-        if [[ $bytes_per_sec -gt 0 ]]; then
-            eta_secs=$(( remaining_bytes / bytes_per_sec ))
-            eta_mins=$(( eta_secs / 60 ))
-            eta_s=$(( eta_secs % 60 ))
-            eta=$(printf "%dm %02ds" "$eta_mins" "$eta_s")
-        fi
-    fi
-
-    # Speed calculation
-    speed="--"
-    if [[ $elapsed_secs -gt 0 ]] && [[ $transferred_bytes -gt 0 ]]; then
-        bps=$(( transferred_bytes / elapsed_secs ))
-        speed="$(human_size "$bps")/s"
-    fi
-
-    # Progress header line
-    printf "  ${C_BOLD}[%*d/%d]${C_RESET} [${C_CYAN}%s${C_RESET}] ${C_BOLD}%3d%%${C_RESET} %s / %s  ${C_DIM}%s  ETA %s${C_RESET}\n" \
-        "${#transfer_count}" "$current" "$transfer_count" \
-        "$bar" "$pct" "$transferred_human" "$transfer_human" \
-        "$speed" "$eta"
-
-    # Check for NTFS-incompatible filename
+    # NTFS-incompatible check
     local_basename=$(basename "$source_path")
     if has_ntfs_bad_chars "$local_basename"; then
         ntfs_incompatible_files+=("$source_path")
-        printf "    ${C_YELLOW}⚠ NTFS${C_RESET}  %s ${C_DIM}(%s) → queued for tar bundle${C_RESET}\n" "$relative_path" "$file_size_human"
-        log_msg "NTFS" "Queued for tar bundle: $relative_path ($file_size_human)" >> "$LOG_FILE"
+        last_file="$relative_path"
+        last_status="${C_YELLOW}⚠ NTFS${C_RESET}"
+        log_line "  ${C_YELLOW}⚠ NTFS${C_RESET}  $relative_path ${C_DIM}($file_size_human)${C_RESET}"
+        log_msg "NTFS" "Queued for tar: $relative_path ($file_size_human)" >> "$LOG_FILE"
         ((transferred_bytes += size_bytes)) || true
+        if (( current % 10 == 0 )); then draw_dashboard; fi
         continue
     fi
 
@@ -262,89 +226,75 @@ while IFS=$'\t' read -r source_path target_path relative_path size_bytes status 
     target_parent=$(dirname "$target_path")
     if [[ ! -d "$target_parent" ]]; then
         mkdir -p "$target_parent" 2>/dev/null || true
-        printf "    ${C_CYAN}📁 MKDIR${C_RESET}  %s\n" "${target_parent#${TARGET}/}"
     fi
 
-    # Copy the file
+    # Copy
     if [[ -f "$source_path" ]]; then
-        cp_start=""
-        cp_start=$(date +%s%N 2>/dev/null || date +%s)
-
         if cp -a "$source_path" "$target_path" 2>/dev/null; then
-            cp_end=""
-            cp_end=$(date +%s%N 2>/dev/null || date +%s)
-
-            # File copy speed (if nanoseconds available)
-            cp_speed=""
-            if [[ ${#cp_start} -gt 10 ]] && [[ $size_bytes -gt 0 ]]; then
-                cp_ns=$(( cp_end - cp_start ))
-                if [[ $cp_ns -gt 0 ]]; then
-                    cp_bps=$(( (size_bytes * 1000000000) / cp_ns ))
-                    cp_speed=" @ $(human_size "$cp_bps")/s"
-                fi
-            fi
-
-            printf "    ${C_GREEN}✓ OK${C_RESET}     %s ${C_DIM}(%s%s)${C_RESET}\n" "$relative_path" "$file_size_human" "$cp_speed"
+            last_file="$relative_path"
+            last_status="${C_GREEN}✓ OK${C_RESET}  "
+            log_line "  ${C_GREEN}✓${C_RESET} $relative_path ${C_DIM}($file_size_human)${C_RESET}"
             log_msg "OK" "cp $relative_path ($file_size_human)" >> "$LOG_FILE"
             ((success_count++)) || true
         else
-            printf "    ${C_RED}✗ FAIL${C_RESET}   %s ${C_DIM}(%s) — copy failed${C_RESET}\n" "$relative_path" "$file_size_human"
-            log_msg "FAIL" "cp $relative_path — cp failed ($file_size_human)" >> "$LOG_FILE"
+            last_file="$relative_path"
+            last_status="${C_RED}✗ FAIL${C_RESET}"
+            log_line "  ${C_RED}✗${C_RESET} $relative_path ${C_DIM}($file_size_human) — FAILED${C_RESET}"
+            log_msg "FAIL" "cp $relative_path ($file_size_human)" >> "$LOG_FILE"
             ((error_count++)) || true
         fi
     elif [[ -d "$source_path" ]]; then
         mkdir -p "$target_path" 2>/dev/null || true
-        printf "    ${C_CYAN}📁 MKDIR${C_RESET}  %s ${C_DIM}(empty directory)${C_RESET}\n" "$relative_path"
+        last_file="$relative_path"
+        last_status="${C_CYAN}📁 DIR${C_RESET} "
+        log_line "  ${C_CYAN}📁${C_RESET} $relative_path ${C_DIM}(empty dir)${C_RESET}"
         log_msg "OK" "mkdir $relative_path" >> "$LOG_FILE"
         ((success_count++)) || true
     else
-        printf "    ${C_DIM}⊘ SKIP${C_RESET}   %s ${C_DIM}(not a regular file)${C_RESET}\n" "$relative_path"
         log_msg "SKIP" "$relative_path — not a regular file" >> "$LOG_FILE"
     fi
 
     ((transferred_bytes += size_bytes)) || true
 
+    # Update dashboard every 10 files
+    if (( current % 10 == 0 )); then
+        draw_dashboard
+    fi
+
 done < <(jq -r '.[] | select(.status == "NEEDS_BACKUP" or .status == "PARTIAL") | [.source_path, .target_path, .relative_path, (.size_bytes | tostring), .status, (.priority | tostring)] | @tsv' "$MANIFEST_FILE")
 
-echo ""
+# Final dashboard update
+draw_dashboard
 
 # ═══════════════════════════════════════
-#   NTFS-INCOMPATIBLE BUNDLE
+#   POST-TRANSFER (in scroll region)
 # ═══════════════════════════════════════
+
+# NTFS-incompatible bundle
 if [[ ${#ntfs_incompatible_files[@]} -gt 0 ]]; then
-    print_subheader "NTFS-Incompatible Files Bundle"
-    echo ""
-    printf "  ${C_YELLOW}▸${C_RESET} Bundling %d files into ntfs-incompatible.tar.gz ...\n" "${#ntfs_incompatible_files[@]}"
-
-    for f in "${ntfs_incompatible_files[@]}"; do
-        printf "    ${C_DIM}+ %s${C_RESET}\n" "${f#${SOURCE}/}"
-    done
+    log_line ""
+    log_line "  ${C_YELLOW}${C_BOLD}── NTFS Bundle ──${C_RESET} ${#ntfs_incompatible_files[@]} files"
 
     tar_list_file=$(mktemp)
     for f in "${ntfs_incompatible_files[@]}"; do
         echo "$f" >> "$tar_list_file"
+        log_line "    ${C_DIM}+ ${f#${SOURCE}/}${C_RESET}"
     done
 
     if tar -czf "$NTFS_TAR" -T "$tar_list_file" 2>/dev/null; then
         tar_size=$(stat -c '%s' "$NTFS_TAR" 2>/dev/null || echo 0)
-        printf "\n  ${C_GREEN}✓${C_RESET} Created ntfs-incompatible.tar.gz (%s, %d files)\n" "$(human_size "$tar_size")" "${#ntfs_incompatible_files[@]}"
-        log_msg "TAR" "Created ntfs-incompatible.tar.gz (${#ntfs_incompatible_files[@]} files, $(human_size "$tar_size"))" >> "$LOG_FILE"
+        log_line "  ${C_GREEN}✓${C_RESET} ntfs-incompatible.tar.gz ($(human_size "$tar_size"))"
+        log_msg "TAR" "ntfs-incompatible.tar.gz (${#ntfs_incompatible_files[@]} files)" >> "$LOG_FILE"
     else
-        printf "\n  ${C_RED}✗${C_RESET} Failed to create ntfs-incompatible.tar.gz\n"
-        log_msg "FAIL" "Failed to create ntfs-incompatible.tar.gz" >> "$LOG_FILE"
+        log_line "  ${C_RED}✗${C_RESET} Failed to create ntfs-incompatible.tar.gz"
         ((error_count++)) || true
     fi
-
     rm -f "$tar_list_file"
-    echo ""
 fi
 
-# ═══════════════════════════════════════
-#   PERMISSION-CRITICAL TAR ARCHIVES
-# ═══════════════════════════════════════
-print_subheader "Permission-Critical Archives"
-echo ""
-printf "  ${C_DIM}These tar archives preserve Linux permissions for restoration on ext4/btrfs.${C_RESET}\n\n"
+# Permission-critical tar archives
+log_line ""
+log_line "  ${C_CYAN}${C_BOLD}── Permission Archives ──${C_RESET}"
 
 for perm_dir in "${PERMISSION_CRITICAL_DIRS[@]}"; do
     source_dir="${SOURCE}/home/${DEFAULT_USER}/${perm_dir}"
@@ -354,38 +304,23 @@ for perm_dir in "${PERMISSION_CRITICAL_DIRS[@]}"; do
         [[ "$perm_dir" == ".ssh" ]] && tar_name="ssh-keys.tar.gz"
         [[ -z "${tar_name:-}" ]] && tar_name="${perm_dir#.}-keys.tar.gz"
 
-        dir_size=""
-        dir_size=$(du -sb "$source_dir" 2>/dev/null | awk '{print $1}' || echo 0)
-        file_count
-        file_count=$(find "$source_dir" -type f 2>/dev/null | wc -l)
-
-        printf "  ${C_CYAN}▸${C_RESET} Creating ${C_BOLD}%s${C_RESET} from %s (%d files, %s) ...\n" \
-            "$tar_name" "$perm_dir" "$file_count" "$(human_size "$dir_size")"
-
-        # List contents
-        while IFS= read -r f; do
-            printf "    ${C_DIM}+ %s${C_RESET}\n" "${f#${source_dir}/}"
-        done < <(find "$source_dir" -type f 2>/dev/null)
+        fc=$(find "$source_dir" -type f 2>/dev/null | wc -l)
+        log_line "  ${C_CYAN}▸${C_RESET} $tar_name ($fc files)"
 
         if tar -czf "${TARGET}/${tar_name}" -C "${SOURCE}/home/${DEFAULT_USER}" "$perm_dir" 2>/dev/null; then
-            tar_size=$(stat -c '%s' "${TARGET}/${tar_name}" 2>/dev/null || echo 0)
-            printf "    ${C_GREEN}✓${C_RESET} %s created (%s compressed)\n\n" "$tar_name" "$(human_size "$tar_size")"
-            log_msg "TAR" "Created $tar_name ($file_count files, $(human_size "$tar_size") compressed)" >> "$LOG_FILE"
+            ts=$(stat -c '%s' "${TARGET}/${tar_name}" 2>/dev/null || echo 0)
+            log_line "    ${C_GREEN}✓${C_RESET} Created ($(human_size "$ts") compressed)"
+            log_msg "TAR" "$tar_name ($fc files, $(human_size "$ts"))" >> "$LOG_FILE"
         else
-            printf "    ${C_RED}✗${C_RESET} Failed to create %s\n\n" "$tar_name"
-            log_msg "FAIL" "Failed to create $tar_name" >> "$LOG_FILE"
+            log_line "    ${C_RED}✗${C_RESET} Failed"
             ((error_count++)) || true
         fi
     else
-        printf "  ${C_DIM}⊘ %s not found at %s — skipped${C_RESET}\n\n" "$perm_dir" "$source_dir"
+        log_line "  ${C_DIM}⊘ $perm_dir not found — skipped${C_RESET}"
     fi
 done
 
-# System data collection removed — user does not want OS/system backups
-# (no package lists, crontabs, or systemd services)
-echo ""
-
-# --- Final log entry ---
+# Final log
 {
     echo ""
     echo "# Completed: $(date '+%Y-%m-%d %H:%M:%S')"
@@ -396,55 +331,33 @@ echo ""
 # ═══════════════════════════════════════
 #   FINAL SUMMARY
 # ═══════════════════════════════════════
-total_elapsed
 total_elapsed=$(elapsed_since "$TRANSFER_START")
 total_secs=$(( $(date +%s) - TRANSFER_START ))
 avg_speed="--"
-[[ $total_secs -gt 0 ]] && avg_speed="$(human_size $(( transferred_bytes / total_secs )))/s"
+[[ $total_secs -gt 0 ]] && [[ $transferred_bytes -gt 0 ]] && avg_speed="$(human_size $(( transferred_bytes / total_secs )))/s"
 
-print_header "TRANSFER COMPLETE"
-
-printf "  ${C_BOLD}Duration:${C_RESET}            %s\n" "$total_elapsed"
-printf "  ${C_BOLD}Average speed:${C_RESET}       %s\n" "$avg_speed"
-echo ""
-
-printf "  ${C_GREEN}█${C_RESET} ${C_BOLD}Copied:${C_RESET}              %'d files  %10s\n" "$success_count" "$(human_size "$transferred_bytes")"
-
-if [[ ${#ntfs_incompatible_files[@]} -gt 0 ]]; then
-    printf "  ${C_YELLOW}█${C_RESET} ${C_BOLD}NTFS-bundled:${C_RESET}        %'d files  ${C_DIM}(in ntfs-incompatible.tar.gz)${C_RESET}\n" "${#ntfs_incompatible_files[@]}"
+log_line ""
+log_line "  ${C_BOLD}${C_GREEN}══════════════════════════════════════════════════════════════${C_RESET}"
+log_line "  ${C_BOLD}${C_GREEN}  TRANSFER COMPLETE${C_RESET}  $total_elapsed  $avg_speed avg"
+log_line "  ${C_BOLD}${C_GREEN}══════════════════════════════════════════════════════════════${C_RESET}"
+log_line ""
+log_line "  ${C_GREEN}█${C_RESET} Copied:       $success_count files ($(human_size "$transferred_bytes"))"
+[[ ${#ntfs_incompatible_files[@]} -gt 0 ]] && log_line "  ${C_YELLOW}█${C_RESET} NTFS-bundled: ${#ntfs_incompatible_files[@]} files"
+if [[ $error_count -gt 0 ]]; then
+    log_line "  ${C_RED}█${C_RESET} Errors:       $error_count files"
+else
+    log_line "  ${C_GREEN}█${C_RESET} Errors:       0"
 fi
+log_line ""
+log_line "  ${C_CYAN}📋${C_RESET} Log: $LOG_FILE"
+[[ -f "${TARGET}/ssh-keys.tar.gz" ]] && log_line "  ${C_CYAN}🔑${C_RESET} SSH: ${TARGET}/ssh-keys.tar.gz"
+[[ -f "${TARGET}/gnupg-keys.tar.gz" ]] && log_line "  ${C_CYAN}🔐${C_RESET} GPG: ${TARGET}/gnupg-keys.tar.gz"
+log_line ""
 
 if [[ $error_count -gt 0 ]]; then
-    printf "  ${C_RED}█${C_RESET} ${C_BOLD}Errors:${C_RESET}              %'d files\n" "$error_count"
+    log_line "  ${C_BG_YELLOW}${C_WHITE} ⚠ $error_count ERRORS — review $LOG_FILE ${C_RESET}"
 else
-    printf "  ${C_GREEN}█${C_RESET} ${C_BOLD}Errors:${C_RESET}              0\n"
+    log_line "  ${C_BG_GREEN}${C_WHITE} ✓ ALL FILES TRANSFERRED SUCCESSFULLY ${C_RESET}"
 fi
-echo ""
-
-# List output artifacts
-print_subheader "Output Artifacts"
-echo ""
-printf "  ${C_CYAN}📋${C_RESET} Log:              %s\n" "$LOG_FILE"
-
-if [[ -f "${TARGET}/ssh-keys.tar.gz" ]]; then
-    printf "  ${C_CYAN}🔑${C_RESET} SSH keys:         %s (%s)\n" "${TARGET}/ssh-keys.tar.gz" \
-        "$(human_size "$(stat -c '%s' "${TARGET}/ssh-keys.tar.gz" 2>/dev/null || echo 0)")"
-fi
-if [[ -f "${TARGET}/gnupg-keys.tar.gz" ]]; then
-    printf "  ${C_CYAN}🔐${C_RESET} GPG keys:         %s (%s)\n" "${TARGET}/gnupg-keys.tar.gz" \
-        "$(human_size "$(stat -c '%s' "${TARGET}/gnupg-keys.tar.gz" 2>/dev/null || echo 0)")"
-fi
-if [[ -f "$NTFS_TAR" ]]; then
-    printf "  ${C_CYAN}📦${C_RESET} NTFS bundle:      %s (%s)\n" "$NTFS_TAR" \
-        "$(human_size "$(stat -c '%s' "$NTFS_TAR" 2>/dev/null || echo 0)")"
-fi
-echo ""
-
-if [[ $error_count -gt 0 ]]; then
-    printf "  ${C_BG_YELLOW}${C_WHITE} ⚠ %d ERRORS — review %s ${C_RESET}\n" "$error_count" "$LOG_FILE"
-    printf "  ${C_DIM}Re-run checker.sh to identify any remaining files.${C_RESET}\n"
-else
-    printf "  ${C_BG_GREEN}${C_WHITE} ✓ ALL FILES TRANSFERRED SUCCESSFULLY ${C_RESET}\n"
-    printf "  ${C_DIM}Re-run checker.sh to validate — NEEDS_BACKUP table should be empty.${C_RESET}\n"
-fi
-echo ""
+log_line "  ${C_DIM}Re-run checker.sh to validate.${C_RESET}"
+log_line ""

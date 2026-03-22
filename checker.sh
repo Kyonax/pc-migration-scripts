@@ -23,6 +23,7 @@ SOURCE="$DEFAULT_SOURCE"
 TARGET="$DEFAULT_TARGET"
 USER_NAME="$DEFAULT_USER"
 OUTPUT_DIR="$DEFAULT_OUTPUT"
+SAVE_PACKAGES=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -30,13 +31,15 @@ while [[ $# -gt 0 ]]; do
         --target)  TARGET="$2"; shift 2 ;;
         --user)    USER_NAME="$2"; shift 2 ;;
         --output)  OUTPUT_DIR="$2"; shift 2 ;;
+        --save-packages) SAVE_PACKAGES=true; shift ;;
         -h|--help)
-            echo "Usage: $0 [--source DIR] [--target DIR] [--user NAME] [--output DIR]"
+            echo "Usage: $0 [--source DIR] [--target DIR] [--user NAME] [--output DIR] [--save-packages]"
             echo ""
-            echo "  --source   Root of the broken system (default: $DEFAULT_SOURCE)"
-            echo "  --target   Backup destination directory (default: $DEFAULT_TARGET)"
-            echo "  --user     Username on the broken system (default: $DEFAULT_USER)"
-            echo "  --output   Directory for report and manifest (default: $DEFAULT_OUTPUT)"
+            echo "  --source         Root of the broken system (default: $DEFAULT_SOURCE)"
+            echo "  --target         Backup destination directory (default: $DEFAULT_TARGET)"
+            echo "  --user           Username on the broken system (default: $DEFAULT_USER)"
+            echo "  --output         Directory for report and manifest (default: $DEFAULT_OUTPUT)"
+            echo "  --save-packages  Extract pacman/yay package lists (does not affect reports)"
             exit 0
             ;;
         *) echo "Unknown option: $1"; exit 1 ;;
@@ -574,3 +577,61 @@ log_line "  ${C_CYAN}📦${C_RESET} Manifest: $MANIFEST_FILE"
 log_line ""
 log_line "  ${C_BOLD}${C_GREEN}Review the report, then run mover.sh${C_RESET}"
 log_line ""
+
+# ═══════════════════════════════════════
+#   OPTIONAL: SAVE PACKAGE LISTS
+# ═══════════════════════════════════════
+# Only runs with --save-packages flag. Does NOT affect reports or manifest.
+if [[ "$SAVE_PACKAGES" == "true" ]]; then
+    PKG_DIR="${OUTPUT_DIR}/package-lists"
+    mkdir -p "$PKG_DIR"
+
+    log_line "  ${C_CYAN}${C_BOLD}── Saving Package Lists (--save-packages) ──${C_RESET}"
+    log_line ""
+
+    # pacman explicit packages
+    log_line "  ${C_CYAN}▸${C_RESET} pacman -Qqe (explicitly installed)..."
+    if arch-chroot "$SOURCE" pacman -Qqe > "${PKG_DIR}/pacman-explicit.txt" 2>/dev/null; then
+        pkg_count=$(wc -l < "${PKG_DIR}/pacman-explicit.txt")
+        log_line "    ${C_GREEN}✓${C_RESET} pacman-explicit.txt ($pkg_count packages)"
+    else
+        log_line "    ${C_YELLOW}△${C_RESET} arch-chroot failed — trying fallback..."
+        if [[ -d "${SOURCE}/var/lib/pacman/local" ]]; then
+            ls "${SOURCE}/var/lib/pacman/local/" | sed 's/-[0-9].*//' | sort -u > "${PKG_DIR}/pacman-explicit.txt" 2>/dev/null
+            pkg_count=$(wc -l < "${PKG_DIR}/pacman-explicit.txt")
+            log_line "    ${C_GREEN}✓${C_RESET} pacman-explicit.txt ($pkg_count packages, from pacman db)"
+        else
+            log_line "    ${C_RED}✗${C_RESET} No pacman database found"
+        fi
+    fi
+
+    # pacman AUR / foreign packages
+    log_line "  ${C_CYAN}▸${C_RESET} pacman -Qqm (AUR / foreign)..."
+    if arch-chroot "$SOURCE" pacman -Qqm > "${PKG_DIR}/pacman-aur.txt" 2>/dev/null; then
+        aur_count=$(wc -l < "${PKG_DIR}/pacman-aur.txt")
+        log_line "    ${C_GREEN}✓${C_RESET} pacman-aur.txt ($aur_count packages)"
+    else
+        log_line "    ${C_YELLOW}△${C_RESET} arch-chroot failed for AUR list"
+    fi
+
+    # Full package list with versions
+    log_line "  ${C_CYAN}▸${C_RESET} pacman -Q (all with versions)..."
+    if arch-chroot "$SOURCE" pacman -Q > "${PKG_DIR}/pacman-all-versions.txt" 2>/dev/null; then
+        all_count=$(wc -l < "${PKG_DIR}/pacman-all-versions.txt")
+        log_line "    ${C_GREEN}✓${C_RESET} pacman-all-versions.txt ($all_count packages)"
+    else
+        log_line "    ${C_YELLOW}△${C_RESET} arch-chroot failed for full list"
+    fi
+
+    # Raw pacman db listing (always works, no chroot needed)
+    log_line "  ${C_CYAN}▸${C_RESET} Raw pacman database listing..."
+    if [[ -d "${SOURCE}/var/lib/pacman/local" ]]; then
+        ls "${SOURCE}/var/lib/pacman/local/" > "${PKG_DIR}/pacman-db-raw.txt" 2>/dev/null
+        raw_count=$(wc -l < "${PKG_DIR}/pacman-db-raw.txt")
+        log_line "    ${C_GREEN}✓${C_RESET} pacman-db-raw.txt ($raw_count entries)"
+    fi
+
+    log_line ""
+    log_line "  ${C_GREEN}✓${C_RESET} Package lists saved to: ${PKG_DIR}/"
+    log_line ""
+fi
