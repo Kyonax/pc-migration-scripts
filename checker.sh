@@ -63,6 +63,156 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# ═══════════════════════════════════════
+#   --save-packages: STANDALONE MODE
+# ═══════════════════════════════════════
+# Runs separately — does NOT touch reports, does NOT run the scan.
+if [[ "$SAVE_PACKAGES" == "true" ]]; then
+    HOME_DIR="${SOURCE}/home/${USER_NAME}"
+    PKG_FILE="${OUTPUT_DIR}/packages.json"
+    PKG_TXT="${OUTPUT_DIR}/packages.txt"
+
+    if [[ ! -d "$SOURCE" ]]; then
+        echo "ERROR: Source does not exist: $SOURCE"
+        exit 1
+    fi
+
+    echo "══════════════════════════════════════════════════════════"
+    echo "  Collecting Package Names"
+    echo "══════════════════════════════════════════════════════════"
+    echo ""
+    echo "  Source: $SOURCE"
+    echo "  User:   $USER_NAME"
+    echo ""
+
+    # Collect all names into a simple "name|platform" list
+    pkg_lines=()
+
+    # pacman — folder names in /var/lib/pacman/local/
+    echo -n "  pacman... "
+    if [[ -d "${SOURCE}/var/lib/pacman/local" ]]; then
+        while IFS= read -r name; do
+            [[ -n "$name" ]] && pkg_lines+=("${name}|pacman")
+        done < <(ls -1 "${SOURCE}/var/lib/pacman/local/" 2>/dev/null | sed 's/-[0-9].*//' | sort -u)
+        echo "${#pkg_lines[@]} packages"
+    else
+        echo "not found"
+    fi
+
+    # npm global — folder names in node_modules/
+    echo -n "  npm global... "
+    npm_before=${#pkg_lines[@]}
+    for d in "${HOME_DIR}/.nvm/versions/node"/*/lib/node_modules \
+             "${HOME_DIR}/.npm-global/lib/node_modules" \
+             "${SOURCE}/usr/lib/node_modules"; do
+        [[ -d "$d" ]] || continue
+        for name in $(ls -1 "$d" 2>/dev/null | grep -v '^npm$' | grep -v '^corepack$' | grep -v '^@'); do
+            [[ -n "$name" ]] && pkg_lines+=("${name}|npm")
+        done
+        # Scoped: @scope/pkg
+        for scope in $(ls -1 "$d" 2>/dev/null | grep '^@'); do
+            [[ -d "$d/$scope" ]] || continue
+            for name in $(ls -1 "$d/$scope" 2>/dev/null); do
+                [[ -n "$name" ]] && pkg_lines+=("${scope}/${name}|npm")
+            done
+        done
+    done
+    echo "$(( ${#pkg_lines[@]} - npm_before )) packages"
+
+    # cargo — binary names in ~/.cargo/bin/
+    echo -n "  cargo... "
+    cargo_before=${#pkg_lines[@]}
+    if [[ -d "${HOME_DIR}/.cargo/bin" ]]; then
+        for name in $(ls -1 "${HOME_DIR}/.cargo/bin" 2>/dev/null | grep -v '^\.' ); do
+            [[ -n "$name" ]] && pkg_lines+=("${name}|cargo")
+        done
+    fi
+    echo "$(( ${#pkg_lines[@]} - cargo_before )) packages"
+
+    # go — binary names in ~/go/bin/
+    echo -n "  go... "
+    go_before=${#pkg_lines[@]}
+    for d in "${HOME_DIR}/go/bin" "${HOME_DIR}/.local/share/go/bin"; do
+        [[ -d "$d" ]] || continue
+        for name in $(ls -1 "$d" 2>/dev/null); do
+            [[ -n "$name" ]] && pkg_lines+=("${name}|go")
+        done
+    done
+    echo "$(( ${#pkg_lines[@]} - go_before )) packages"
+
+    # pip — .dist-info folder names in site-packages/
+    echo -n "  pip... "
+    pip_before=${#pkg_lines[@]}
+    for d in "${HOME_DIR}/.local/lib/python"*/site-packages; do
+        [[ -d "$d" ]] || continue
+        for name in $(ls -1 "$d" 2>/dev/null | grep '\.dist-info$' | sed 's/\.dist-info$//;s/-[0-9].*//'); do
+            [[ -n "$name" ]] && pkg_lines+=("${name}|pip")
+        done
+    done
+    echo "$(( ${#pkg_lines[@]} - pip_before )) packages"
+
+    # gem — folder names in gems/
+    echo -n "  gem... "
+    gem_before=${#pkg_lines[@]}
+    for d in "${HOME_DIR}/.local/share/gem/ruby"/*/gems "${HOME_DIR}/.gem/ruby"/*/gems; do
+        [[ -d "$d" ]] || continue
+        for name in $(ls -1 "$d" 2>/dev/null | sed 's/-[0-9].*//'); do
+            [[ -n "$name" ]] && pkg_lines+=("${name}|gem")
+        done
+    done
+    echo "$(( ${#pkg_lines[@]} - gem_before )) packages"
+
+    # Write JSON
+    echo ""
+    echo -n "  Writing packages.json... "
+    {
+        echo "["
+        first=true
+        for entry in "${pkg_lines[@]}"; do
+            name="${entry%%|*}"
+            platform="${entry##*|}"
+            if [[ "$first" == "true" ]]; then
+                printf '  {"name":"%s","platform":"%s"}' "$name" "$platform"
+                first=false
+            else
+                printf '\n  ,{"name":"%s","platform":"%s"}' "$name" "$platform"
+            fi
+        done
+        echo ""
+        echo "]"
+    } > "$PKG_FILE"
+    echo "OK (${#pkg_lines[@]} entries)"
+
+    # Write text
+    echo -n "  Writing packages.txt... "
+    {
+        echo "# Packages — $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "# Total: ${#pkg_lines[@]}"
+        cur_plat=""
+        for entry in "${pkg_lines[@]}"; do
+            name="${entry%%|*}"
+            platform="${entry##*|}"
+            if [[ "$platform" != "$cur_plat" ]]; then
+                cur_plat="$platform"
+                echo ""
+                echo "## $platform"
+            fi
+            echo "  $name"
+        done
+    } > "$PKG_TXT"
+    echo "OK"
+
+    echo ""
+    echo "  Total: ${#pkg_lines[@]} packages"
+    echo "  JSON:  $PKG_FILE"
+    echo "  Text:  $PKG_TXT"
+    echo ""
+    exit 0
+fi
+
+# ═══════════════════════════════════════
+#   MAIN SCAN MODE (below here)
+# ═══════════════════════════════════════
 REPORT_FILE="${OUTPUT_DIR}/backup_report.md"
 MANIFEST_FILE="${OUTPUT_DIR}/backup_manifest.json"
 SCAN_START=$(date +%s)
@@ -594,182 +744,3 @@ log_line "  ${C_CYAN}📦${C_RESET} Manifest: $MANIFEST_FILE"
 log_line ""
 log_line "  ${C_BOLD}${C_GREEN}Review the report, then run mover.sh${C_RESET}"
 log_line ""
-
-# ═══════════════════════════════════════
-#   OPTIONAL: SAVE PACKAGE NAMES
-# ═══════════════════════════════════════
-# Only runs with --save-packages flag. Does NOT affect reports or manifest.
-# Reads folder names only — never scans inside packages.
-if [[ "$SAVE_PACKAGES" == "true" ]]; then
-    PKG_FILE="${OUTPUT_DIR}/packages.json"
-    PKG_TXT="${OUTPUT_DIR}/packages.txt"
-    HOME_DIR="${SOURCE}/home/${USER_NAME}"
-
-    log_line ""
-    log_line "  ${C_CYAN}${C_BOLD}── Collecting Package Names (--save-packages) ──${C_RESET}"
-    log_line ""
-
-    pkg_json_entries=()
-    pkg_total=0
-
-    # Helper: add packages from a newline-separated list
-    add_packages() {
-        local platform="$1" subtype="$2" pkg_list="$3" count=0
-        while IFS= read -r pkg; do
-            [[ -z "$pkg" ]] && continue
-            pkg_json_entries+=("{\"name\":\"$pkg\",\"platform\":\"$platform\",\"type\":\"$subtype\"}")
-            ((count++)) || true
-            ((pkg_total++)) || true
-        done <<< "$pkg_list"
-        echo "$count"
-    }
-
-    # Helper: list folder names in a directory (just names, nothing else)
-    list_dirs() {
-        local dir="$1"
-        [[ -d "$dir" ]] && ls -1 "$dir" 2>/dev/null | sort -u || true
-    }
-
-    # ── pacman ──
-    log_line "  ${C_CYAN}▸${C_RESET} pacman..."
-    pacman_list=""
-    if [[ -d "${SOURCE}/var/lib/pacman/local" ]]; then
-        pacman_list=$(list_dirs "${SOURCE}/var/lib/pacman/local" | sed 's/-[0-9].*//' | sort -u)
-    fi
-    if [[ -n "$pacman_list" ]]; then
-        c=$(add_packages "pacman" "installed" "$pacman_list")
-        log_line "    ${C_GREEN}✓${C_RESET} $c packages"
-    else
-        log_line "    ${C_DIM}⊘ Not found${C_RESET}"
-    fi
-
-    # ── npm global ──
-    log_line "  ${C_CYAN}▸${C_RESET} npm global..."
-    npm_list=""
-    for d in "${HOME_DIR}/.nvm/versions/node"/*/lib/node_modules \
-             "${HOME_DIR}/.npm-global/lib/node_modules" \
-             "${SOURCE}/usr/lib/node_modules"; do
-        [[ -d "$d" ]] || continue
-        # Regular packages (folder names)
-        npm_list+=$(list_dirs "$d" | grep -v '^npm$' | grep -v '^corepack$' | grep -v '^@')
-        npm_list+=$'\n'
-        # Scoped packages (@scope/name → read scope folder names)
-        for scope in "$d"/@*/; do
-            [[ -d "$scope" ]] || continue
-            s=$(basename "$scope")
-            for p in "$scope"/*/; do
-                [[ -d "$p" ]] || continue
-                npm_list+="${s}/$(basename "$p")"$'\n'
-            done
-        done
-    done
-    npm_list=$(echo "$npm_list" | sed '/^$/d' | sort -u)
-    if [[ -n "$npm_list" ]]; then
-        c=$(add_packages "npm" "global" "$npm_list")
-        log_line "    ${C_GREEN}✓${C_RESET} $c packages"
-    else
-        log_line "    ${C_DIM}⊘ Not found${C_RESET}"
-    fi
-
-    # ── cargo ──
-    log_line "  ${C_CYAN}▸${C_RESET} cargo..."
-    cargo_list=""
-    if [[ -d "${HOME_DIR}/.cargo/bin" ]]; then
-        cargo_list=$(list_dirs "${HOME_DIR}/.cargo/bin" | grep -v '^\.')
-    fi
-    if [[ -n "$cargo_list" ]]; then
-        c=$(add_packages "cargo" "installed" "$cargo_list")
-        log_line "    ${C_GREEN}✓${C_RESET} $c crates"
-    else
-        log_line "    ${C_DIM}⊘ Not found${C_RESET}"
-    fi
-
-    # ── go ──
-    log_line "  ${C_CYAN}▸${C_RESET} go..."
-    go_list=""
-    for d in "${HOME_DIR}/go/bin" "${HOME_DIR}/.local/share/go/bin"; do
-        [[ -d "$d" ]] && go_list+=$(list_dirs "$d")$'\n'
-    done
-    go_list=$(echo "$go_list" | sed '/^$/d' | sort -u)
-    if [[ -n "$go_list" ]]; then
-        c=$(add_packages "go" "installed" "$go_list")
-        log_line "    ${C_GREEN}✓${C_RESET} $c binaries"
-    else
-        log_line "    ${C_DIM}⊘ Not found${C_RESET}"
-    fi
-
-    # ── pip ──
-    log_line "  ${C_CYAN}▸${C_RESET} pip..."
-    pip_list=""
-    for d in "${HOME_DIR}/.local/lib/python"*/site-packages; do
-        [[ -d "$d" ]] || continue
-        # Folder names ending in .dist-info = installed packages
-        pip_list+=$(list_dirs "$d" | grep '\.dist-info$' | sed 's/\.dist-info$//;s/-[0-9].*//' | sort -u)
-        pip_list+=$'\n'
-    done
-    pip_list=$(echo "$pip_list" | sed '/^$/d' | sort -u)
-    if [[ -n "$pip_list" ]]; then
-        c=$(add_packages "pip" "user" "$pip_list")
-        log_line "    ${C_GREEN}✓${C_RESET} $c packages"
-    else
-        log_line "    ${C_DIM}⊘ Not found${C_RESET}"
-    fi
-
-    # ── gem ──
-    log_line "  ${C_CYAN}▸${C_RESET} gem..."
-    gem_list=""
-    for d in "${HOME_DIR}/.local/share/gem/ruby"/*/gems \
-             "${HOME_DIR}/.gem/ruby"/*/gems; do
-        [[ -d "$d" ]] && gem_list+=$(list_dirs "$d" | sed 's/-[0-9].*//' | sort -u)$'\n'
-    done
-    gem_list=$(echo "$gem_list" | sed '/^$/d' | sort -u)
-    if [[ -n "$gem_list" ]]; then
-        c=$(add_packages "gem" "user" "$gem_list")
-        log_line "    ${C_GREEN}✓${C_RESET} $c gems"
-    else
-        log_line "    ${C_DIM}⊘ Not found${C_RESET}"
-    fi
-
-    # ── Write JSON ──
-    log_line ""
-    log_line "  ${C_CYAN}▸${C_RESET} Writing packages.json ($pkg_total total)..."
-    {
-        echo "["
-        first=true
-        for entry in "${pkg_json_entries[@]}"; do
-            if [[ "$first" == "true" ]]; then
-                echo "  $entry"
-                first=false
-            else
-                echo "  ,$entry"
-            fi
-        done
-        echo "]"
-    } > "$PKG_FILE"
-    log_line "    ${C_GREEN}✓${C_RESET} $PKG_FILE"
-
-    # ── Write text ──
-    log_line "  ${C_CYAN}▸${C_RESET} Writing packages.txt..."
-    {
-        echo "# Package inventory — $(date '+%Y-%m-%d %H:%M:%S')"
-        echo "# Source: $SOURCE"
-        echo "# Total: $pkg_total packages"
-        cur_plat="" ; cur_type=""
-        for entry in "${pkg_json_entries[@]}"; do
-            p=$(echo "$entry" | grep -oP '"platform":"[^"]*"' | cut -d'"' -f4)
-            t=$(echo "$entry" | grep -oP '"type":"[^"]*"' | cut -d'"' -f4)
-            n=$(echo "$entry" | grep -oP '"name":"[^"]*"' | cut -d'"' -f4)
-            if [[ "$p/$t" != "$cur_plat/$cur_type" ]]; then
-                cur_plat="$p" ; cur_type="$t"
-                echo ""
-                echo "## $p ($t)"
-            fi
-            echo "  $n"
-        done
-    } > "$PKG_TXT"
-    log_line "    ${C_GREEN}✓${C_RESET} $PKG_TXT"
-
-    log_line ""
-    log_line "  ${C_GREEN}${C_BOLD}✓ $pkg_total packages collected${C_RESET}"
-    log_line ""
-fi
