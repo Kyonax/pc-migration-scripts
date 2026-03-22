@@ -54,6 +54,9 @@ if [[ ! -d "$SOURCE" ]]; then
     exit 1
 fi
 
+# --- Clean previous reports ---
+rm -f "$REPORT_FILE" "$MANIFEST_FILE" 2>/dev/null || true
+
 # --- Counters ---
 total_files=0
 needs_backup_count=0
@@ -332,6 +335,27 @@ scan_file() {
     fi
 }
 
+# --- Build find prune expression ---
+# Generates: \( -name "node_modules" -o -name ".cache" -o ... \) -prune
+build_prune_expr() {
+    local expr=""
+    local first=true
+    for pdir in "${PRUNE_DIRS[@]}"; do
+        # Use basename only (prune matches directory names at any depth)
+        local base
+        base=$(basename "$pdir")
+        if [[ "$first" == "true" ]]; then
+            expr="-name \"$base\""
+            first=false
+        else
+            expr="$expr -o -name \"$base\""
+        fi
+    done
+    echo "$expr"
+}
+
+PRUNE_EXPR=$(build_prune_expr)
+
 # --- Scan a directory recursively ---
 scan_directory() {
     local dir_path="$1"
@@ -342,27 +366,29 @@ scan_directory() {
         return
     fi
 
-    current_dir_total=$(find "$dir_path" -mindepth 1 \( -type f -o -type l \) 2>/dev/null | wc -l)
+    # Count files (with pruning for accurate count)
+    current_dir_total=$(eval "find \"$dir_path\" -mindepth 1 \\( -type d \\( $PRUNE_EXPR \\) -prune \\) -o \\( -type f -o -type l \\) -print" 2>/dev/null | wc -l)
     current_dir_files=0
     current_dir_name="$dir_label"
 
     draw_dashboard
 
     log_line ""
-    log_line "  ${C_CYAN}${C_BOLD}── $dir_label ──${C_RESET} ${C_DIM}($current_dir_total files)${C_RESET}"
+    log_line "  ${C_CYAN}${C_BOLD}── $dir_label ──${C_RESET} ${C_DIM}($current_dir_total files, pruning ${#PRUNE_DIRS[@]} dir patterns)${C_RESET}"
 
+    # Main scan with pruning — skips excluded directories entirely (fast)
     while IFS= read -r -d '' file; do
         scan_file "$file"
-    done < <(find "$dir_path" -mindepth 1 \( -type f -o -type l \) -print0 2>/dev/null)
+    done < <(eval "find \"$dir_path\" -mindepth 1 \\( -type d \\( $PRUNE_EXPR \\) -prune \\) -o \\( -type f -o -type l \\) -print0" 2>/dev/null)
 
-    # Empty directories
+    # Empty directories (also with pruning)
     while IFS= read -r -d '' dir; do
         local dir_rel="${dir#${SOURCE}/}"
         local target_dir="${TARGET}/${dir_rel}"
         if [[ -z "$(ls -A "$dir" 2>/dev/null)" ]]; then
             add_entry "$dir" "$target_dir" "$dir_rel" 0 "NEEDS_BACKUP" 2 "directory" "null" "empty directory"
         fi
-    done < <(find "$dir_path" -mindepth 1 -type d -empty -print0 2>/dev/null)
+    done < <(eval "find \"$dir_path\" -mindepth 1 \\( -type d \\( $PRUNE_EXPR \\) -prune \\) -o \\( -type d -empty -print0 \\)" 2>/dev/null)
 
     draw_dashboard
 }

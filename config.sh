@@ -57,24 +57,44 @@ EXCLUDE_PATTERNS=(
     # Caches (regenerable)
     ".cache"
     ".thumbnails"
-    # Package manager caches
+    # JS / Node
     "node_modules"
-    "__pycache__"
     ".npm"
     ".yarn/cache"
+    ".yarn/unplugged"
     ".pnpm-store"
+    ".next"
+    ".nuxt"
+    "dist"
+    "build"
+    ".turbo"
+    ".parcel-cache"
+    # Python
+    "__pycache__"
+    ".venv"
+    "venv"
+    ".tox"
+    ".mypy_cache"
+    ".pytest_cache"
+    "*.egg-info"
+    # Rust / Go / Java
     ".cargo/registry"
+    ".cargo/git"
     ".gradle/caches"
+    ".gradle/daemon"
     ".m2/repository"
-    ".nvm/.cache"
-    ".nvm/versions"
+    "target"
+    # Ruby / PHP
     ".bundle/cache"
     ".gem/cache"
     ".composer/cache"
-    # Build output
-    ".venv"
-    "venv"
-    # Desktop/app junk
+    "vendor/bundle"
+    # Misc dev
+    ".nvm/.cache"
+    ".nvm/versions"
+    ".docker"
+    ".vagrant.d/boxes"
+    # Desktop / app junk
     ".local/share/Trash"
     ".local/share/baloo"
     ".local/share/akonadi"
@@ -84,6 +104,34 @@ EXCLUDE_PATTERNS=(
     ".local/share/Steam"
     ".local/share/lutris"
     ".wine"
+)
+
+# Directories to PRUNE during find (never descend into these)
+# This is critical for performance — without pruning, find walks
+# thousands of files inside node_modules before is_excluded() rejects them
+PRUNE_DIRS=(
+    "node_modules"
+    ".cache"
+    "__pycache__"
+    ".npm"
+    ".venv"
+    "venv"
+    ".cargo/registry"
+    ".cargo/git"
+    ".gradle"
+    ".m2"
+    ".nvm/versions"
+    ".local/share/Trash"
+    ".local/share/Steam"
+    ".wine"
+    ".docker"
+    ".next"
+    ".nuxt"
+    ".turbo"
+    ".parcel-cache"
+    "target"
+    "dist"
+    "build"
 )
 
 # --- NTFS-Incompatible Characters ---
