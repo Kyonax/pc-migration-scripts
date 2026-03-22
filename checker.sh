@@ -596,59 +596,226 @@ log_line "  ${C_BOLD}${C_GREEN}Review the report, then run mover.sh${C_RESET}"
 log_line ""
 
 # ═══════════════════════════════════════
-#   OPTIONAL: SAVE PACKAGE LISTS
+#   OPTIONAL: SAVE PACKAGE NAMES
 # ═══════════════════════════════════════
 # Only runs with --save-packages flag. Does NOT affect reports or manifest.
+# Collects package NAMES (not files) from all detected package managers
+# and outputs a single JSON file + readable text file.
 if [[ "$SAVE_PACKAGES" == "true" ]]; then
-    PKG_DIR="${OUTPUT_DIR}/package-lists"
-    mkdir -p "$PKG_DIR"
+    PKG_FILE="${OUTPUT_DIR}/packages.json"
+    PKG_TXT="${OUTPUT_DIR}/packages.txt"
+    HOME_DIR="${SOURCE}/home/${USER_NAME}"
 
-    log_line "  ${C_CYAN}${C_BOLD}── Saving Package Lists (--save-packages) ──${C_RESET}"
+    log_line ""
+    log_line "  ${C_CYAN}${C_BOLD}── Collecting Package Names (--save-packages) ──${C_RESET}"
     log_line ""
 
-    # pacman explicit packages
-    log_line "  ${C_CYAN}▸${C_RESET} pacman -Qqe (explicitly installed)..."
-    if arch-chroot "$SOURCE" pacman -Qqe > "${PKG_DIR}/pacman-explicit.txt" 2>/dev/null; then
-        pkg_count=$(wc -l < "${PKG_DIR}/pacman-explicit.txt")
-        log_line "    ${C_GREEN}✓${C_RESET} pacman-explicit.txt ($pkg_count packages)"
+    # Start JSON array
+    pkg_json_entries=()
+    pkg_total=0
+
+    # Helper: add packages from a newline-separated list
+    add_packages() {
+        platform="$1"
+        subtype="$2"
+        pkg_list="$3"
+        count=0
+        while IFS= read -r pkg; do
+            [[ -z "$pkg" ]] && continue
+            pkg_json_entries+=("{\"name\":\"$pkg\",\"platform\":\"$platform\",\"type\":\"$subtype\"}")
+            ((count++)) || true
+            ((pkg_total++)) || true
+        done <<< "$pkg_list"
+        echo "$count"
+    }
+
+    # ── pacman (explicit) ──
+    log_line "  ${C_CYAN}▸${C_RESET} pacman — explicitly installed..."
+    pacman_list=""
+    if arch-chroot "$SOURCE" pacman -Qqe > /tmp/_pkg_pacman.txt 2>/dev/null; then
+        pacman_list=$(cat /tmp/_pkg_pacman.txt)
+    elif [[ -d "${SOURCE}/var/lib/pacman/local" ]]; then
+        pacman_list=$(ls "${SOURCE}/var/lib/pacman/local/" 2>/dev/null | sed 's/-[0-9].*//' | sort -u)
+    fi
+    if [[ -n "$pacman_list" ]]; then
+        c=$(add_packages "pacman" "explicit" "$pacman_list")
+        log_line "    ${C_GREEN}✓${C_RESET} $c packages"
     else
-        log_line "    ${C_YELLOW}△${C_RESET} arch-chroot failed — trying fallback..."
-        if [[ -d "${SOURCE}/var/lib/pacman/local" ]]; then
-            ls "${SOURCE}/var/lib/pacman/local/" | sed 's/-[0-9].*//' | sort -u > "${PKG_DIR}/pacman-explicit.txt" 2>/dev/null
-            pkg_count=$(wc -l < "${PKG_DIR}/pacman-explicit.txt")
-            log_line "    ${C_GREEN}✓${C_RESET} pacman-explicit.txt ($pkg_count packages, from pacman db)"
-        else
-            log_line "    ${C_RED}✗${C_RESET} No pacman database found"
+        log_line "    ${C_YELLOW}△${C_RESET} No pacman packages found"
+    fi
+
+    # ── pacman (AUR / foreign) ──
+    log_line "  ${C_CYAN}▸${C_RESET} pacman — AUR / foreign..."
+    aur_list=""
+    if arch-chroot "$SOURCE" pacman -Qqm > /tmp/_pkg_aur.txt 2>/dev/null; then
+        aur_list=$(cat /tmp/_pkg_aur.txt)
+    fi
+    if [[ -n "$aur_list" ]]; then
+        c=$(add_packages "pacman" "aur" "$aur_list")
+        log_line "    ${C_GREEN}✓${C_RESET} $c packages"
+    else
+        log_line "    ${C_DIM}⊘ None found or arch-chroot failed${C_RESET}"
+    fi
+
+    # ── npm global ──
+    log_line "  ${C_CYAN}▸${C_RESET} npm — global packages..."
+    npm_list=""
+    # npm globals are in lib/node_modules under the npm prefix
+    for npm_dir in "${HOME_DIR}/.nvm/versions/node"/*/lib/node_modules \
+                   "${HOME_DIR}/.npm-global/lib/node_modules" \
+                   "${SOURCE}/usr/lib/node_modules"; do
+        if [[ -d "$npm_dir" ]]; then
+            for pkg_dir in "$npm_dir"/*/; do
+                [[ -d "$pkg_dir" ]] || continue
+                pkg_name=$(basename "$pkg_dir")
+                [[ "$pkg_name" == "npm" ]] && continue  # skip npm itself
+                [[ "$pkg_name" == "corepack" ]] && continue
+                npm_list+="${pkg_name}"$'\n'
+            done
         fi
-    fi
-
-    # pacman AUR / foreign packages
-    log_line "  ${C_CYAN}▸${C_RESET} pacman -Qqm (AUR / foreign)..."
-    if arch-chroot "$SOURCE" pacman -Qqm > "${PKG_DIR}/pacman-aur.txt" 2>/dev/null; then
-        aur_count=$(wc -l < "${PKG_DIR}/pacman-aur.txt")
-        log_line "    ${C_GREEN}✓${C_RESET} pacman-aur.txt ($aur_count packages)"
+    done
+    # Also check for scoped packages (@org/pkg)
+    for npm_dir in "${HOME_DIR}/.nvm/versions/node"/*/lib/node_modules \
+                   "${HOME_DIR}/.npm-global/lib/node_modules" \
+                   "${SOURCE}/usr/lib/node_modules"; do
+        if [[ -d "$npm_dir" ]]; then
+            for scope_dir in "$npm_dir"/@*/; do
+                [[ -d "$scope_dir" ]] || continue
+                scope=$(basename "$scope_dir")
+                for pkg_dir in "$scope_dir"/*/; do
+                    [[ -d "$pkg_dir" ]] || continue
+                    npm_list+="${scope}/$(basename "$pkg_dir")"$'\n'
+                done
+            done
+        fi
+    done
+    npm_list=$(echo "$npm_list" | sort -u | sed '/^$/d')
+    if [[ -n "$npm_list" ]]; then
+        c=$(add_packages "npm" "global" "$npm_list")
+        log_line "    ${C_GREEN}✓${C_RESET} $c packages"
     else
-        log_line "    ${C_YELLOW}△${C_RESET} arch-chroot failed for AUR list"
+        log_line "    ${C_DIM}⊘ None found${C_RESET}"
     fi
 
-    # Full package list with versions
-    log_line "  ${C_CYAN}▸${C_RESET} pacman -Q (all with versions)..."
-    if arch-chroot "$SOURCE" pacman -Q > "${PKG_DIR}/pacman-all-versions.txt" 2>/dev/null; then
-        all_count=$(wc -l < "${PKG_DIR}/pacman-all-versions.txt")
-        log_line "    ${C_GREEN}✓${C_RESET} pacman-all-versions.txt ($all_count packages)"
+    # ── cargo (installed binaries) ──
+    log_line "  ${C_CYAN}▸${C_RESET} cargo — installed crates..."
+    cargo_list=""
+    cargo_install="${HOME_DIR}/.cargo/.crates2.json"
+    if [[ -f "$cargo_install" ]]; then
+        # .crates2.json has keys like "package_name version (registry+...)"
+        cargo_list=$(grep -oP '"[^"]+\s[^"]+\s\(registry' "$cargo_install" 2>/dev/null | sed 's/^"//;s/ .*//' | sort -u)
+    elif [[ -d "${HOME_DIR}/.cargo/bin" ]]; then
+        # Fallback: list binaries in cargo/bin
+        cargo_list=$(ls "${HOME_DIR}/.cargo/bin/" 2>/dev/null | grep -v '^\.' | sort -u)
+    fi
+    if [[ -n "$cargo_list" ]]; then
+        c=$(add_packages "cargo" "installed" "$cargo_list")
+        log_line "    ${C_GREEN}✓${C_RESET} $c crates"
     else
-        log_line "    ${C_YELLOW}△${C_RESET} arch-chroot failed for full list"
+        log_line "    ${C_DIM}⊘ None found${C_RESET}"
     fi
 
-    # Raw pacman db listing (always works, no chroot needed)
-    log_line "  ${C_CYAN}▸${C_RESET} Raw pacman database listing..."
-    if [[ -d "${SOURCE}/var/lib/pacman/local" ]]; then
-        ls "${SOURCE}/var/lib/pacman/local/" > "${PKG_DIR}/pacman-db-raw.txt" 2>/dev/null
-        raw_count=$(wc -l < "${PKG_DIR}/pacman-db-raw.txt")
-        log_line "    ${C_GREEN}✓${C_RESET} pacman-db-raw.txt ($raw_count entries)"
+    # ── go (installed binaries) ──
+    log_line "  ${C_CYAN}▸${C_RESET} go — installed binaries..."
+    go_list=""
+    for go_bin in "${HOME_DIR}/go/bin" "${HOME_DIR}/.local/share/go/bin"; do
+        if [[ -d "$go_bin" ]]; then
+            go_list+=$(ls "$go_bin" 2>/dev/null | sort -u)
+            go_list+=$'\n'
+        fi
+    done
+    go_list=$(echo "$go_list" | sort -u | sed '/^$/d')
+    if [[ -n "$go_list" ]]; then
+        c=$(add_packages "go" "installed" "$go_list")
+        log_line "    ${C_GREEN}✓${C_RESET} $c binaries"
+    else
+        log_line "    ${C_DIM}⊘ None found${C_RESET}"
     fi
+
+    # ── pip (user packages) ──
+    log_line "  ${C_CYAN}▸${C_RESET} pip — user packages..."
+    pip_list=""
+    for pip_dir in "${HOME_DIR}/.local/lib/python"*/site-packages; do
+        if [[ -d "$pip_dir" ]]; then
+            pip_list+=$(find "$pip_dir" -maxdepth 1 -name '*.dist-info' 2>/dev/null \
+                | xargs -I{} basename {} .dist-info \
+                | sed 's/-[0-9].*//' | sort -u)
+            pip_list+=$'\n'
+        fi
+    done
+    pip_list=$(echo "$pip_list" | sort -u | sed '/^$/d')
+    if [[ -n "$pip_list" ]]; then
+        c=$(add_packages "pip" "user" "$pip_list")
+        log_line "    ${C_GREEN}✓${C_RESET} $c packages"
+    else
+        log_line "    ${C_DIM}⊘ None found${C_RESET}"
+    fi
+
+    # ── gem (ruby) ──
+    log_line "  ${C_CYAN}▸${C_RESET} gem — ruby gems..."
+    gem_list=""
+    for gem_dir in "${HOME_DIR}/.local/share/gem/ruby"/*/gems \
+                   "${HOME_DIR}/.gem/ruby"/*/gems; do
+        if [[ -d "$gem_dir" ]]; then
+            gem_list+=$(ls "$gem_dir" 2>/dev/null | sed 's/-[0-9].*//' | sort -u)
+            gem_list+=$'\n'
+        fi
+    done
+    gem_list=$(echo "$gem_list" | sort -u | sed '/^$/d')
+    if [[ -n "$gem_list" ]]; then
+        c=$(add_packages "gem" "user" "$gem_list")
+        log_line "    ${C_GREEN}✓${C_RESET} $c gems"
+    else
+        log_line "    ${C_DIM}⊘ None found${C_RESET}"
+    fi
+
+    # ── Write JSON ──
+    log_line ""
+    log_line "  ${C_CYAN}▸${C_RESET} Writing packages.json ($pkg_total total)..."
+    {
+        echo "["
+        first=true
+        for entry in "${pkg_json_entries[@]}"; do
+            if [[ "$first" == "true" ]]; then
+                echo "  $entry"
+                first=false
+            else
+                echo "  ,$entry"
+            fi
+        done
+        echo "]"
+    } > "$PKG_FILE"
+    log_line "    ${C_GREEN}✓${C_RESET} $PKG_FILE"
+
+    # ── Write readable text ──
+    log_line "  ${C_CYAN}▸${C_RESET} Writing packages.txt..."
+    {
+        echo "# Package inventory — $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "# Source: $SOURCE"
+        echo "# Total: $pkg_total packages"
+        echo ""
+
+        current_platform=""
+        current_type=""
+        for entry in "${pkg_json_entries[@]}"; do
+            p=$(echo "$entry" | grep -oP '"platform":"[^"]*"' | cut -d'"' -f4)
+            t=$(echo "$entry" | grep -oP '"type":"[^"]*"' | cut -d'"' -f4)
+            n=$(echo "$entry" | grep -oP '"name":"[^"]*"' | cut -d'"' -f4)
+            if [[ "$p/$t" != "$current_platform/$current_type" ]]; then
+                current_platform="$p"
+                current_type="$t"
+                echo ""
+                echo "## $p ($t)"
+            fi
+            echo "  $n"
+        done
+    } > "$PKG_TXT"
+    log_line "    ${C_GREEN}✓${C_RESET} $PKG_TXT"
 
     log_line ""
-    log_line "  ${C_GREEN}✓${C_RESET} Package lists saved to: ${PKG_DIR}/"
+    log_line "  ${C_GREEN}${C_BOLD}✓ $pkg_total packages collected across all platforms${C_RESET}"
     log_line ""
+
+    # Cleanup temp files
+    rm -f /tmp/_pkg_pacman.txt /tmp/_pkg_aur.txt 2>/dev/null || true
 fi
